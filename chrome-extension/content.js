@@ -97,6 +97,7 @@
   let etchObserver = null;
   let etchStartTime = null;
   let etchInitialRules = null;           // serialized stylesheet snapshot (ownerNode + ruleTexts[])
+  let etchSkippedSheets = new WeakSet();  // sheets skipped for the current Etch session (oversized, frozen membership)
   let etchStyleInitials = new Map();     // Element → initial style attribute value
   let etchClassInitials = new Map();     // Element → initial class attribute value
   let etchAttrInitials = new Map();      // Element → Map<attrName, oldValue> (non-style/class)
@@ -2303,7 +2304,8 @@
     clearEtchMarkers();
     etchMode = true;
     etchStartTime = Date.now();
-    etchInitialRules = serializeAllStylesheets();
+    etchSkippedSheets = new WeakSet();
+    etchInitialRules = serializeAllStylesheets(true);
     etchStyleInitials.clear();
     etchClassInitials.clear();
     etchAttrInitials.clear();
@@ -2347,9 +2349,32 @@
     if (counter.style.display !== display) counter.style.display = display;
   }
 
-  function serializeAllStylesheets() {
+  // Skip oversized generated sheets: element class/style edits are captured by Etch's
+  // MutationObserver independently of stylesheet-rule diffing.
+  const ETCH_MAX_SHEET_RULES = 4000;
+
+  function exceedsEtchRuleBudget(rules) {
+    let seen = 0;
+    const pending = [rules];
+
+    while (pending.length > 0) {
+      const current = pending.pop();
+      for (let i = 0; i < current.length; i++) {
+        seen++;
+        if (seen > ETCH_MAX_SHEET_RULES) return true;
+
+        const nested = current[i].cssRules;
+        if (nested?.length) pending.push(nested);
+      }
+    }
+
+    return false;
+  }
+
+  function serializeAllStylesheets(establishSkipSet = false) {
     const sheets = [];
     let crossOriginCount = 0;
+    let skippedLargeCount = 0;
 
     for (let si = 0; si < document.styleSheets.length; si++) {
       const sheet = document.styleSheets[si];
@@ -2358,6 +2383,18 @@
 
       try {
         const rules = sheet.cssRules;
+
+        // Only the initial (capture-start) pass decides skip membership; later
+        // passes reuse it so undo/redo restoration stays symmetric even if the
+        // sheet grows mid-session.
+        if (establishSkipSet && exceedsEtchRuleBudget(rules)) {
+          etchSkippedSheets.add(sheet);
+        }
+        if (etchSkippedSheets.has(sheet)) {
+          skippedLargeCount++;
+          continue;
+        }
+
         const sheetLabel = sheet.href || `inline stylesheet`;
 
         // Individual top-level rule strings for undo/redo (each passed directly to insertRule)
@@ -2381,7 +2418,7 @@
       }
     }
 
-    return { sheets, crossOriginCount };
+    return { sheets, crossOriginCount, skippedLargeCount };
   }
 
   function serializeRulesRecursive(rules, output) {
@@ -2999,6 +3036,9 @@
 
         if (etchInitialRules?.crossOriginCount > 0) {
           warnings.push(`${etchInitialRules.crossOriginCount} cross-origin stylesheet(s) could not be tracked`);
+        }
+        if (etchInitialRules?.skippedLargeCount > 0) {
+          warnings.push(`${etchInitialRules.skippedLargeCount} large stylesheet(s) not rule-diffed`);
         }
 
         let beforeScreenshot = null;
