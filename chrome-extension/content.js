@@ -111,6 +111,39 @@
   let panelEl = null;
   let markersContainer = null;
   let styleEl = null;
+
+  // Tailedit (shadow-DOM Tailwind class editor, plan 283) — lazily created
+  let taileditController = null;
+
+  // True while the shadow-DOM class editor owns hover/click/keyboard (plan 283).
+  function taileditActive() {
+    return !!(taileditController && taileditController.isActive());
+  }
+
+  // Lazily construct the editor, wiring it to Etch via the single-mutation
+  // contract (it writes classes to real host elements; capture is unchanged).
+  function ensureTailedit() {
+    if (taileditController) return taileditController;
+    const factory = window.__piTailedit && window.__piTailedit.createTailedit;
+    if (!factory) {
+      console.warn("[pi-annotate] tailedit module not loaded");
+      return null;
+    }
+    taileditController = factory({
+      isPiElement,
+      getEtchState: () => ({ recording: etchMode }),
+      startEtchCapture: () => {
+        const box = document.getElementById("pi-etch-mode");
+        if (box && !box.checked) {
+          box.checked = true;
+          box.dispatchEvent(new Event("change", { bubbles: true }));
+        } else {
+          startEtchCapture();
+        }
+      },
+    });
+    return taileditController;
+  }
   
   // ─────────────────────────────────────────────────────────────────────
   // Styles
@@ -725,6 +758,9 @@
   function resetState() {
     if (etchObserver) { etchObserver.disconnect(); etchObserver = null; }
 
+    taileditController?.destroy();
+    taileditController = null;
+
     elementStack = [];
     stackIndex = 0;
     selectedElements = [];
@@ -786,7 +822,10 @@
     if (etchCheckbox) etchCheckbox.checked = false;
     const etchToggle = etchCheckbox?.closest(".pi-etch-toggle");
     if (etchToggle) etchToggle.classList.remove("recording");
-    
+
+    const taileditCheckbox = document.getElementById("pi-tailedit-mode");
+    if (taileditCheckbox) taileditCheckbox.checked = false;
+
     // Update count
     const countEl = document.getElementById("pi-count");
     if (countEl) countEl.textContent = "0 selected";
@@ -810,6 +849,9 @@
 
     if (etchObserver) { etchObserver.disconnect(); etchObserver = null; }
     clearEtchMarkers();
+
+    taileditController?.destroy();
+    taileditController = null;
 
     styleEl?.remove();
     highlightEl?.remove();
@@ -916,6 +958,10 @@
           <span>Etch</span>
           <span class="pi-etch-badge" id="pi-etch-count" style="display:none"></span>
         </label>
+        <label class="pi-notes-toggle" title="Visual Tailwind class editor: hover an element, Space to pin, edit its classes">
+          <input type="checkbox" id="pi-tailedit-mode" />
+          <span>Edit</span>
+        </label>
       </div>
       <div class="pi-context-row">
         <input type="text" id="pi-context" placeholder="General context (optional)..." />
@@ -964,6 +1010,19 @@
       } else {
         stopEtchCapture();
         if (toggle) toggle.classList.remove("recording");
+      }
+    });
+
+    // Tailedit: shadow-DOM Tailwind class editor (plan 283)
+    document.getElementById("pi-tailedit-mode").addEventListener("change", (e) => {
+      const ctrl = ensureTailedit();
+      if (!ctrl) { e.target.checked = false; return; }
+      if (e.target.checked) {
+        hideHighlight();
+        hideTooltip();
+        ctrl.enable();
+      } else {
+        ctrl.disable();
       }
     });
     
@@ -1535,6 +1594,12 @@
   // ─────────────────────────────────────────────────────────────────────
   
   function onMouseMove(e) {
+    // While the shadow class editor is active it owns hover-inspect (plan 283).
+    if (taileditActive()) {
+      hideHighlight();
+      hideTooltip();
+      return;
+    }
     if (!isActive || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) {
       hideHighlight();
       hideTooltip();
@@ -1568,6 +1633,7 @@
   }
   
   function onWheel(e) {
+    if (taileditActive()) return;
     if (!isActive || !elementStack.length || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) return;
     
     if (!e.altKey) return;
@@ -1584,6 +1650,8 @@
   }
   
   function onClick(e) {
+    // Editing mode: don't hijack page clicks for annotation selection (plan 283).
+    if (taileditActive()) return;
     if (!isActive || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) return;
     
     e.preventDefault();
@@ -1622,6 +1690,9 @@
   
   function onKeyDown(e) {
     if (!isActive) return;
+    // Keydown scoping (plan 283): events retargeted to the editor's shadow host
+    // belong to the class editor (typing/Escape in its input) — don't cancel.
+    if (e.target && e.target.id === "pi-tailedit-root") return;
     if (e.key === "Escape") {
       e.preventDefault();
       handleCancel();
