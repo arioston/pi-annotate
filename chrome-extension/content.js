@@ -2441,14 +2441,26 @@
     }
   }
 
+  // Cache each grouping rule's at-rule prefix. `.cssText` on a grouping rule
+  // serializes its entire child list, so computing it once per rule (instead of
+  // once per nested descendant) turns getParentRuleContext from O(rules x group
+  // size) into O(unique grouping rules). Output strings are unchanged.
+  const etchParentPrefixCache = new WeakMap();
+
+  function etchGroupingRulePrefix(rule) {
+    const cached = etchParentPrefixCache.get(rule);
+    if (cached !== undefined) return cached;
+    const prefix = rule.cssText ? rule.cssText.split("{")[0].trim() : "";
+    etchParentPrefixCache.set(rule, prefix);
+    return prefix;
+  }
+
   function getParentRuleContext(rule) {
     const parts = [];
     let parent = rule.parentRule;
     while (parent) {
-      // Extract the at-rule prefix (everything before the first "{")
-      if (parent.cssText) {
-        parts.unshift(parent.cssText.split("{")[0].trim());
-      }
+      const prefix = etchGroupingRulePrefix(parent);
+      if (prefix) parts.unshift(prefix);
       parent = parent.parentRule;
     }
     return parts.length > 0 ? parts.join(" > ") : null;
