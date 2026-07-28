@@ -47,6 +47,10 @@
     .te-highlight.pinned { border-color: #f0c674; background: rgba(240, 198, 116, 0.12); }
     .te-panel {
       position: fixed;
+      /* Also declared here, not only on :host — the host node is a div, so a
+         page rule setting font-family on div with !important outranks the
+         :host declaration and would otherwise inherit into the panel. */
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       width: 320px;
       max-height: 70vh;
       overflow: auto;
