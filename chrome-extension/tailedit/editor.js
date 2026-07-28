@@ -80,6 +80,15 @@
     }
     .te-close:hover { color: #e0e0e0; }
     .te-body { padding: 10px; }
+    .te-tabs { display: flex; gap: 4px; margin-bottom: 8px; border-bottom: 1px solid #333; }
+    .te-tab {
+      flex: 1; background: none; color: #808080; border: none; border-bottom: 2px solid transparent;
+      padding: 5px 6px; font-size: 11px; cursor: pointer;
+    }
+    .te-tab:hover { color: #e0e0e0; }
+    .te-tab.active { color: #8abeb7; border-bottom-color: #8abeb7; }
+    .te-pane[hidden] { display: none; }
+    .te-controls-placeholder { padding: 20px 8px; color: #666; font-size: 11px; text-align: center; }
     .te-etch {
       font-size: 11px; padding: 6px 8px; border-radius: 4px; margin-bottom: 8px;
       display: flex; align-items: center; gap: 8px;
@@ -148,11 +157,18 @@
       border: 1px solid #505050; border-radius: 4px; display: none; z-index: 3;
     }
     .te-opt {
-      display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+      display: flex; align-items: flex-start; gap: 8px; padding: 5px 8px;
       cursor: pointer; font-family: ui-monospace, Menlo, monospace; font-size: 12px;
     }
     .te-opt:hover, .te-opt.active { background: #3a3a4a; }
     .te-opt .sw { width: 12px; height: 12px; border-radius: 2px; border: 1px solid #0006; flex: none; }
+    .te-opt .opt-body { min-width: 0; flex: 1; }
+    .te-opt .opt-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .te-opt .te-css {
+      display: block; overflow: hidden; color: #858595; font-size: 10px; line-height: 1.3;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .te-opt .te-css .default { color: #666; }
     .te-opt .src { margin-left: auto; color: #666; font-size: 10px; }
     .te-actions { margin-top: 8px; display: flex; gap: 6px; }
     .te-btn {
@@ -176,6 +192,7 @@
     let hoverEl = null;
     let pinnedEl = null;
     let activeOpt = -1;
+    let activeTab = "classes";
     let els = {}; // shadow-root element refs
     // Last element the hover renderer drew, so mousemove only re-renders when
     // the target actually changes (§ no-freeze contract: nothing per-move).
@@ -226,23 +243,32 @@
         </div>
         <div class="te-body">
           <div class="te-etch off"></div>
-          <div class="te-target"><span class="muted">Hover an element, click or press Space to pin</span></div>
-          <div class="te-nav">
-            <button class="te-up" title="parent element">▲ parent</button>
-            <button class="te-down" title="first child element">▼ child</button>
-            <button class="te-prev" title="previous sibling">◀ prev</button>
-            <button class="te-next" title="next sibling">▶ next</button>
+          <div class="te-tabs" role="tablist">
+            <button class="te-tab active" data-tab="classes" role="tab">Classes</button>
+            <button class="te-tab" data-tab="controls" role="tab">Controls</button>
           </div>
-          <div class="te-chips"></div>
-          <div class="te-vars"></div>
-          <div class="te-input-wrap">
-            <input class="te-input" type="text" placeholder="add class (e.g. bg-blue-500) — Enter to apply" spellcheck="false" />
-            <div class="te-drop"></div>
+          <div class="te-pane" data-pane="classes">
+            <div class="te-target"><span class="muted">Hover an element, click or press Space to pin</span></div>
+            <div class="te-nav">
+              <button class="te-up" title="parent element">▲ parent</button>
+              <button class="te-down" title="first child element">▼ child</button>
+              <button class="te-prev" title="previous sibling">◀ prev</button>
+              <button class="te-next" title="next sibling">▶ next</button>
+            </div>
+            <div class="te-chips"></div>
+            <div class="te-vars"></div>
+            <div class="te-input-wrap">
+              <input class="te-input" type="text" placeholder="add class — e.g. bg-blue-500 or w-[37px]" spellcheck="false" />
+              <div class="te-drop"></div>
+            </div>
+            <div class="te-actions">
+              <button class="te-btn te-copy">Copy classlist</button>
+            </div>
+            <div class="te-hint">Click or Space pins the hovered element · edits mutate the real class attribute (captured by Etch) · off classes are real removals until re-enabled · arbitrary values: any utility + -[value]</div>
           </div>
-          <div class="te-actions">
-            <button class="te-btn te-copy">Copy classlist</button>
+          <div class="te-pane" data-pane="controls" hidden>
+            <div class="te-controls-placeholder">Visual controls land in Phase C2</div>
           </div>
-          <div class="te-hint">Click or Space pins the hovered element · edits mutate the real class attribute (captured by Etch) · off classes are real removals until re-enabled — submit captures the current state</div>
         </div>
         <div class="te-bp-bar"><span class="bp">base</span><span class="w"></span></div>
       `;
@@ -254,6 +280,8 @@
         highlight,
         panel,
         etch: panel.querySelector(".te-etch"),
+        tabs: panel.querySelectorAll(".te-tab"),
+        panes: panel.querySelectorAll(".te-pane"),
         target: panel.querySelector(".te-target"),
         chips: panel.querySelector(".te-chips"),
         input: panel.querySelector(".te-input"),
@@ -283,6 +311,7 @@
       els.input.addEventListener("input", onInput);
       els.input.addEventListener("keydown", onInputKey);
       els.input.addEventListener("blur", () => setTimeout(hideDrop, 120));
+      els.tabs.forEach((tab) => tab.addEventListener("click", () => setActiveTab(tab.dataset.tab)));
       // Keep the panel's own events from leaking to the host page. This MUST
       // be the bubble phase: a capture-phase stopPropagation() here runs
       // before the event reaches the button inside the panel, which silently
@@ -325,6 +354,16 @@
       if (els.highlight) els.highlight.style.display = "none";
       if (els.panel) els.panel.style.display = "none";
       hideDrop();
+      setActiveTab("classes");
+    }
+
+    function setActiveTab(tab) {
+      activeTab = tab === "controls" ? "controls" : "classes";
+      if (!els.tabs || !els.panes) return;
+      els.tabs.forEach((button) => button.classList.toggle("active", button.dataset.tab === activeTab));
+      els.panes.forEach((pane) => {
+        pane.hidden = pane.dataset.pane !== activeTab;
+      });
     }
 
     function destroy() {
@@ -595,6 +634,8 @@
         label.className = "lbl";
         label.textContent = cls;
         chip.appendChild(label);
+        const explanation = suggest && suggest.explain ? suggest.explain(cls) : "";
+        if (explanation) chip.title = explanation.css;
         if (!readOnly) {
           const rm = document.createElement("button");
           rm.textContent = "×";
@@ -712,15 +753,34 @@
         const opt = document.createElement("div");
         opt.className = "te-opt";
         opt.dataset.index = String(i);
+        opt.dataset.cls = h.className;
+        if (h.template) opt.dataset.template = "true";
         if (h.preview && h.preview.kind === "color") {
           const sw = document.createElement("span");
           sw.className = "sw";
           sw.style.background = h.preview.value;
           opt.appendChild(sw);
         }
+        const body = document.createElement("span");
+        body.className = "opt-body";
         const name = document.createElement("span");
+        name.className = "opt-name";
         name.textContent = h.className;
-        opt.appendChild(name);
+        body.appendChild(name);
+        const explanation = suggest && suggest.explain ? suggest.explain(h.className) : "";
+        if (explanation) {
+          const css = document.createElement("span");
+          css.className = "te-css";
+          if (explanation.source === "default") {
+            const marker = document.createElement("span");
+            marker.className = "default";
+            marker.textContent = "default · ";
+            css.appendChild(marker);
+          }
+          css.appendChild(document.createTextNode(explanation.css));
+          body.appendChild(css);
+        }
+        opt.appendChild(body);
         const src = document.createElement("span");
         src.className = "src";
         src.textContent = h.source;
@@ -728,7 +788,7 @@
         // mousedown (not click) so the input keeps focus and blur doesn't fire first
         opt.addEventListener("mousedown", (e) => {
           e.preventDefault();
-          chooseSuggestion(h.className);
+          chooseSuggestion(h.className, h.template === true);
         });
         drop.appendChild(opt);
       });
@@ -740,7 +800,16 @@
       activeOpt = -1;
     }
 
-    function chooseSuggestion(cls) {
+    function chooseSuggestion(cls, template = false) {
+      if (template) {
+        const token = cls.replace(/[…]$/, "");
+        els.input.value = token + "[]";
+        const caret = els.input.value.length - 1;
+        els.input.setSelectionRange(caret, caret);
+        els.input.focus();
+        onInput();
+        return;
+      }
       applyAdd(cls);
       els.input.value = "";
       hideDrop();
@@ -752,7 +821,7 @@
       if (e.key === "Enter") {
         e.preventDefault();
         if (activeOpt >= 0 && opts[activeOpt]) {
-          chooseSuggestion(opts[activeOpt].querySelector("span").textContent);
+          chooseSuggestion(opts[activeOpt].dataset.cls, opts[activeOpt].dataset.template === "true");
         } else {
           const token = els.input.value.trim();
           if (token) chooseSuggestion(token); // apply typed token verbatim

@@ -9,7 +9,7 @@
  * No-freeze contract (plans 280/285): the index is built on first editor open,
  * never at content-script load. The CSSOM pass is selector-text-only, honors the
  * same per-sheet rule budget as Etch (ETCH_MAX_SHEET_RULES), does NOT walk
- * `parent.cssText`, is deferred to requestIdleCallback, and degrades to the
+ * parent declaration text, is deferred to requestIdleCallback, and degrades to the
  * static list if a sheet exceeds budget or is cross-origin.
  *
  * Loaded raw (no bundler). Exposes ns.createSuggestionIndex on the single
@@ -21,6 +21,35 @@
 
   const MAX_SHEET_RULES = 4000; // mirrors content.js ETCH_MAX_SHEET_RULES
   const MAX_SUGGESTIONS = 24;
+  const MAX_DECLARATIONS = 6;
+  const ARBITRARY_FAMILIES = new Set([
+    "w", "h", "p", "m", "gap", "text", "bg", "border", "top", "left", "right", "bottom", "z", "rounded",
+  ]);
+  const DERIVED_PREFIXES = [
+    "space-x", "space-y", "gap-x", "gap-y", "min-w", "max-w", "min-h", "max-h", "ring-offset",
+    "background", "border", "rounded", "padding", "margin", "text", "font", "w", "h", "p", "m", "gap",
+  ];
+  const SPACING_SCALE = {
+    "0": "0px", px: "1px", "0.5": "0.125rem", "1": "0.25rem", "1.5": "0.375rem", "2": "0.5rem",
+    "2.5": "0.625rem", "3": "0.75rem", "3.5": "0.875rem", "4": "1rem", "5": "1.25rem",
+    "6": "1.5rem", "7": "1.75rem", "8": "2rem", "9": "2.25rem", "10": "2.5rem", "11": "2.75rem",
+    "12": "3rem", "14": "3.5rem", "16": "4rem", "20": "5rem", "24": "6rem", "28": "7rem",
+    "32": "8rem", "36": "9rem", "40": "10rem", "44": "11rem", "48": "12rem", "52": "13rem",
+    "56": "14rem", "60": "15rem", "64": "16rem", "72": "18rem", "80": "20rem", "96": "24rem",
+  };
+  const SIZING_KEYWORDS = { full: "100%", screen: "100vw", auto: "auto" };
+  const SPACING_PROPERTIES = {
+    p: "padding", px: "padding-inline", py: "padding-block", pt: "padding-top", pr: "padding-right",
+    pb: "padding-bottom", pl: "padding-left", m: "margin", mx: "margin-inline", my: "margin-block",
+    mt: "margin-top", mr: "margin-right", mb: "margin-bottom", ml: "margin-left", gap: "gap",
+    "gap-x": "column-gap", "gap-y": "row-gap", "space-x": "margin-inline-start", "space-y": "margin-block-start",
+  };
+  const SIZING_PROPERTIES = {
+    w: "width", h: "height", "min-w": "min-width", "max-w": "max-width", "min-h": "min-height", "max-h": "max-height",
+  };
+  const TEXT_SIZES = { xs: "0.75rem", sm: "0.875rem", base: "1rem", lg: "1.125rem", xl: "1.25rem", "2xl": "1.5rem", "3xl": "1.875rem", "4xl": "2.25rem", "5xl": "3rem", "6xl": "3.75rem", "7xl": "4.5rem", "8xl": "6rem", "9xl": "8rem" };
+  const FONT_WEIGHTS = { thin: 100, extralight: 200, light: 300, normal: 400, medium: 500, semibold: 600, bold: 700, extrabold: 800, black: 900 };
+  const RADII = { none: "0px", sm: "0.125rem", "": "0.25rem", md: "0.375rem", lg: "0.5rem", xl: "0.75rem", "2xl": "1rem", "3xl": "1.5rem", full: "9999px" };
   // class tokens inside a selector, e.g. `.md\:bg-blue-500:hover` → md:bg-blue-500
   const CLASS_TOKEN_RE = /\.((?:\\.|[-\w[\]#.%/])+)/g;
 
@@ -37,12 +66,19 @@
     let built = false;
     let scanned = false;
     const byPrefix = new Map(); // leadingKey → ClassEntry[]
+    const byClass = new Map(); // exact class name → ClassEntry
     const seen = new Set(); // dedupe className
 
-    function addEntry(className, source) {
-      if (!className || seen.has(className)) return;
+    function addEntry(className, source, rule) {
+      if (!className) return;
+      if (seen.has(className)) {
+        const existing = byClass.get(className);
+        if (rule && existing && !existing.rule) existing.rule = rule;
+        return;
+      }
       seen.add(className);
-      const entry = { className, source, preview: previewFor(className) };
+      const entry = { className, source, preview: previewFor(className), rule };
+      byClass.set(className, entry);
       const key = leadingKey(className);
       let list = byPrefix.get(key);
       if (!list) byPrefix.set(key, (list = []));
@@ -60,6 +96,74 @@
       if (!colorPrefixes.has(prefix)) return null;
       const family = body.slice(dash + 1); // e.g. "blue-500", "white"
       return colors[family] || null;
+    }
+
+    function declarationsOf(rule, max = MAX_DECLARATIONS) {
+      const style = rule && rule.style;
+      if (!style) return "";
+      const parts = [];
+      const limit = Math.min(style.length, max);
+      for (let i = 0; i < limit; i++) {
+        const prop = style[i];
+        const value = style.getPropertyValue(prop).trim();
+        if (prop && value) parts.push(`${prop}: ${value}`);
+      }
+      if (style.length > max) parts.push("…");
+      return parts.join("; ");
+    }
+
+    function utilityBody(className) {
+      const idx = className.lastIndexOf(":");
+      return idx === -1 ? className : className.slice(idx + 1);
+    }
+
+    function splitDerivedUtility(className) {
+      const body = utilityBody(className);
+      for (const prefix of DERIVED_PREFIXES) {
+        if (body === prefix) return [prefix, ""];
+        if (body.startsWith(`${prefix}-`)) return [prefix, body.slice(prefix.length + 1)];
+      }
+      const dash = body.indexOf("-");
+      return [dash === -1 ? body : body.slice(0, dash), dash === -1 ? "" : body.slice(dash + 1)];
+    }
+
+    function scaleValue(value) {
+      return SPACING_SCALE[value] || null;
+    }
+
+    function derivedCss(className) {
+      const [prefix, value] = splitDerivedUtility(className);
+      const hex = colorHex(className);
+      if (hex) {
+        if (prefix === "bg") return `background-color: ${hex}`;
+        if (prefix === "border") return `border-color: ${hex}`;
+        if (prefix === "text") return `color: ${hex}`;
+      }
+
+      const spacing = scaleValue(value);
+      if (spacing && SPACING_PROPERTIES[prefix]) return `${SPACING_PROPERTIES[prefix]}: ${spacing}`;
+
+      if (SIZING_PROPERTIES[prefix]) {
+        const sizing = SIZING_KEYWORDS[value] || spacing;
+        if (sizing) return `${SIZING_PROPERTIES[prefix]}: ${sizing}`;
+      }
+
+      if (prefix === "text" && TEXT_SIZES[value]) return `font-size: ${TEXT_SIZES[value]}`;
+      if (prefix === "font" && FONT_WEIGHTS[value]) return `font-weight: ${FONT_WEIGHTS[value]}`;
+      if (prefix === "rounded" && Object.prototype.hasOwnProperty.call(RADII, value)) return `border-radius: ${RADII[value]}`;
+      return "";
+    }
+
+    // explain stays lazy: only render paths ask for resolved CSS.
+    function explain(className) {
+      const base = utilityBody(className);
+      const entry = byClass.get(base) || byClass.get(className);
+      if (entry && entry.rule) {
+        const css = declarationsOf(entry.rule);
+        if (css) return { css, source: "page" };
+      }
+      const css = derivedCss(className);
+      return css ? { css, source: "default" } : "";
     }
 
     function previewFor(className) {
@@ -87,7 +191,7 @@
       for (const u of ns.data?.utilities || []) addEntry(u, "static");
     }
 
-    // Selector-text-only CSSOM scan, budget-capped, no parent.cssText walks.
+    // Selector-text-only CSSOM scan, budget-capped, with no parent-rule walks.
     function scanSheet(sheet) {
       let rules;
       try {
@@ -108,10 +212,10 @@
             let m;
             CLASS_TOKEN_RE.lastIndex = 0;
             while ((m = CLASS_TOKEN_RE.exec(sel)) !== null) {
-              addEntry(m[1].replace(/\\/g, ""), "cssom");
+              addEntry(m[1].replace(/\\/g, ""), "cssom", rule);
             }
           }
-          const nested = rule.cssRules; // grouping rule (@media/@supports) — one level of refs, no cssText
+          const nested = rule.cssRules; // grouping rule (@media/@supports) — one level of refs, no declaration text
           if (nested && nested.length) pending.push(nested);
         }
       }
@@ -170,33 +274,45 @@
       for (const entry of pool) {
         if (entry.className.startsWith(stub)) {
           out.push(reVariant(entry, variant));
-          if (out.length >= MAX_SUGGESTIONS) return out;
+          if (out.length >= MAX_SUGGESTIONS) break;
         }
       }
-      if (out.length >= 6) return out;
       // fuzzy fallback: substring match across all pools
-      for (const [, list] of byPrefix) {
-        for (const entry of list) {
-          if (entry.className.includes(stub) && !entry.className.startsWith(stub)) {
-            out.push(reVariant(entry, variant));
-            if (out.length >= MAX_SUGGESTIONS) return out;
+      if (out.length < 6) {
+        for (const [, list] of byPrefix) {
+          for (const entry of list) {
+            if (entry.className.includes(stub) && !entry.className.startsWith(stub)) {
+              out.push(reVariant(entry, variant));
+              if (out.length >= MAX_SUGGESTIONS) break;
+            }
           }
+          if (out.length >= MAX_SUGGESTIONS) break;
+        }
+      }
+      const family = stub.split("-", 1)[0];
+      if ((stub.endsWith("-") || ARBITRARY_FAMILIES.has(family)) && !stub.includes("[")) {
+        const template = `${variant}${stub}[…]`;
+        if (!out.some((entry) => entry.className === template)) {
+          if (out.length >= MAX_SUGGESTIONS) out.length = MAX_SUGGESTIONS - 1;
+          out.push({ className: template, source: "arbitrary", template: true });
         }
       }
       return out;
     }
 
     function reVariant(entry, variant) {
-      if (!variant) return entry;
-      // re-attach the typed variant chain to the suggested utility
-      return {
-        className: variant + entry.className,
+      const result = {
+        // Re-attach the typed variant chain to the suggested utility while
+        // keeping the internal CSSStyleRule reference out of query results.
+        className: variant ? variant + entry.className : entry.className,
         source: entry.source,
         preview: entry.preview,
       };
+      if (entry.template) result.template = true;
+      return result;
     }
 
-    return { ensureBuilt, query };
+    return { ensureBuilt, query, explain };
   }
 
   ns.createSuggestionIndex = createSuggestionIndex;
