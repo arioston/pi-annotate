@@ -47,8 +47,6 @@
     .te-highlight.pinned { border-color: #f0c674; background: rgba(240, 198, 116, 0.12); }
     .te-panel {
       position: fixed;
-      right: 16px;
-      bottom: 16px;
       width: 320px;
       max-height: 70vh;
       overflow: auto;
@@ -68,6 +66,8 @@
       justify-content: space-between;
       padding: 8px 10px;
       border-bottom: 1px solid #333;
+      cursor: move;
+      user-select: none;
     }
     .te-title { font-weight: 600; color: #8abeb7; }
     .te-close {
@@ -104,7 +104,33 @@
       font-size: 12px; line-height: 1; padding: 0 2px;
     }
     .te-chip button:hover { color: #cc6666; }
+    .te-chip .tog { color: #8abeb7; }
+    .te-chip .tog:hover { color: #b5d9d3; }
+    .te-chip.off { opacity: 0.45; }
+    .te-chip.off .lbl { text-decoration: line-through; }
+    .te-chips.readonly .te-chip { opacity: 0.85; }
     .te-empty { color: #666; font-style: italic; }
+    .te-nav { display: flex; gap: 4px; margin-bottom: 8px; }
+    .te-nav button {
+      flex: 1; background: #2b2b37; color: #e0e0e0; border: 1px solid #3f3f46;
+      border-radius: 3px; padding: 3px 0; font-size: 11px; cursor: pointer;
+    }
+    .te-nav button:hover:not(:disabled) { background: #3a3a4a; }
+    .te-nav button:disabled { opacity: 0.35; cursor: default; }
+    .te-vars { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; }
+    .te-var {
+      background: #2b2b37; color: #b0b0b0; border: 1px solid #3f3f46;
+      border-radius: 3px; padding: 2px 6px; font-size: 10px; cursor: pointer;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+    .te-var:hover { background: #3a3a4a; color: #e0e0e0; }
+    .te-var.active { border-color: #8abeb7; color: #8abeb7; }
+    .te-bp-bar {
+      border-top: 1px solid #333; padding: 5px 10px; font-size: 10px;
+      color: #808080; font-family: ui-monospace, Menlo, monospace;
+      display: flex; justify-content: space-between;
+    }
+    .te-bp-bar .bp { color: #8abeb7; font-weight: 600; }
     .te-input-wrap { position: relative; }
     .te-input {
       width: 100%; background: #18181e; color: #e0e0e0;
@@ -147,6 +173,26 @@
     let pinnedEl = null;
     let activeOpt = -1;
     let els = {}; // shadow-root element refs
+    // Last element the hover renderer drew, so mousemove only re-renders when
+    // the target actually changes (§ no-freeze contract: nothing per-move).
+    let renderedHoverEl = null;
+    // A manual drag pins the window in place until the next pin().
+    let userMoved = false;
+    let dragFrom = null;
+    // Classes switched off but remembered, per element. The page only ever
+    // sees one classList mutation per toggle; the memory lives here.
+    const disabledClasses = new WeakMap();
+
+    // Default Tailwind breakpoint scale (Phase E replaces this with the
+    // project's own config; keep it in exactly one place).
+    const BREAKPOINTS = [
+      ["2xl", 1536],
+      ["xl", 1280],
+      ["lg", 1024],
+      ["md", 768],
+      ["sm", 640],
+    ];
+    const VARIANTS = ["sm", "md", "lg", "xl", "2xl", "hover", "focus", "dark"];
 
     function classAttr(el) {
       return (el && el.getAttribute && el.getAttribute("class")) || "";
@@ -176,8 +222,15 @@
         </div>
         <div class="te-body">
           <div class="te-etch off"></div>
-          <div class="te-target"><span class="muted">Hover an element, press Space to pin</span></div>
+          <div class="te-target"><span class="muted">Hover an element, click or press Space to pin</span></div>
+          <div class="te-nav">
+            <button class="te-up" title="parent element">▲ parent</button>
+            <button class="te-down" title="first child element">▼ child</button>
+            <button class="te-prev" title="previous sibling">◀ prev</button>
+            <button class="te-next" title="next sibling">▶ next</button>
+          </div>
           <div class="te-chips"></div>
+          <div class="te-vars"></div>
           <div class="te-input-wrap">
             <input class="te-input" type="text" placeholder="add class (e.g. bg-blue-500) — Enter to apply" spellcheck="false" />
             <div class="te-drop"></div>
@@ -185,8 +238,9 @@
           <div class="te-actions">
             <button class="te-btn te-copy">Copy classlist</button>
           </div>
-          <div class="te-hint">Space pins the hovered element · edits mutate the real class attribute (captured by Etch)</div>
+          <div class="te-hint">Click or Space pins the hovered element · edits mutate the real class attribute (captured by Etch) · off classes are real removals until re-enabled — submit captures the current state</div>
         </div>
+        <div class="te-bp-bar"><span class="bp">base</span><span class="w"></span></div>
       `;
 
       shadow.appendChild(highlight);
@@ -202,10 +256,26 @@
         drop: panel.querySelector(".te-drop"),
         copy: panel.querySelector(".te-copy"),
         close: panel.querySelector(".te-close"),
+        head: panel.querySelector(".te-head"),
+        nav: {
+          up: panel.querySelector(".te-up"),
+          down: panel.querySelector(".te-down"),
+          prev: panel.querySelector(".te-prev"),
+          next: panel.querySelector(".te-next"),
+        },
+        vars: panel.querySelector(".te-vars"),
+        bp: panel.querySelector(".te-bp-bar .bp"),
+        bpWidth: panel.querySelector(".te-bp-bar .w"),
       };
 
       els.close.addEventListener("click", () => disable());
       els.copy.addEventListener("click", copyClasslist);
+      els.head.addEventListener("mousedown", onDragStart);
+      els.nav.up.addEventListener("click", () => navigate("up"));
+      els.nav.down.addEventListener("click", () => navigate("down"));
+      els.nav.prev.addEventListener("click", () => navigate("prev"));
+      els.nav.next.addEventListener("click", () => navigate("next"));
+      renderVariantRow();
       els.input.addEventListener("input", onInput);
       els.input.addEventListener("keydown", onInputKey);
       els.input.addEventListener("blur", () => setTimeout(hideDrop, 120));
@@ -223,8 +293,10 @@
       enabled = true;
       els.panel.style.display = "block";
       refreshEtchBanner();
+      refreshBreakpoint();
       document.addEventListener("mousemove", onMove, true);
       document.addEventListener("keydown", onKey, true);
+      document.addEventListener("click", onPageClick, true);
       window.addEventListener("scroll", updateBoxes, true);
       window.addEventListener("resize", updateBoxes);
     }
@@ -233,10 +305,14 @@
       enabled = false;
       document.removeEventListener("mousemove", onMove, true);
       document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("click", onPageClick, true);
       window.removeEventListener("scroll", updateBoxes, true);
       window.removeEventListener("resize", updateBoxes);
+      endDrag(); // drops the transient drag listeners if a drag was in flight
       hoverEl = null;
       pinnedEl = null;
+      renderedHoverEl = null;
+      userMoved = false;
       if (els.highlight) els.highlight.style.display = "none";
       if (els.panel) els.panel.style.display = "none";
       hideDrop();
@@ -251,19 +327,40 @@
     }
 
     // ── hover / highlight ───────────────────────────────────────────────
+    /** Elements the editor must never inspect, navigate to, or pin. */
+    function eligible(el) {
+      return !!el && el !== hostEl && !isPiElement(el) &&
+        el !== document.body && el !== document.documentElement;
+    }
+
     function onMove(e) {
       if (!enabled) return;
       const el = document.elementFromPoint(e.clientX, e.clientY);
-      if (
-        !el || el === hostEl || isPiElement(el) ||
-        el === document.body || el === document.documentElement
-      ) {
+      if (!eligible(el)) {
         hoverEl = null;
         if (!pinnedEl) els.highlight.style.display = "none";
         return;
       }
       hoverEl = el;
-      if (!pinnedEl) drawHighlight(el, false);
+      if (pinnedEl) return;
+      drawHighlight(el, false);
+      // Re-render only on a real target change — never per mousemove.
+      if (el !== renderedHoverEl) {
+        renderedHoverEl = el;
+        renderTarget(el);
+        renderChips(el, true);
+      }
+    }
+
+    /** Click pins, the same as Space, without reaching the page. */
+    function onPageClick(e) {
+      if (!enabled) return;
+      const target = e.target;
+      if (target === hostEl || (hostEl && hostEl.contains(target))) return;
+      if (!eligible(hoverEl)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      pin(hoverEl);
     }
 
     function drawHighlight(el, pinned) {
@@ -280,8 +377,122 @@
 
     function updateBoxes() {
       if (!enabled) return;
-      if (pinnedEl && document.contains(pinnedEl)) drawHighlight(pinnedEl, true);
-      else if (hoverEl && document.contains(hoverEl)) drawHighlight(hoverEl, false);
+      if (pinnedEl && document.contains(pinnedEl)) {
+        drawHighlight(pinnedEl, true);
+        positionPanel(pinnedEl);
+        renderTarget(pinnedEl);
+      } else if (hoverEl && document.contains(hoverEl)) {
+        drawHighlight(hoverEl, false);
+      }
+      refreshBreakpoint();
+    }
+
+    // ── floating window placement ───────────────────────────────────────
+    /**
+     * Park the panel beside the anchor: right, else left, else below, else
+     * above, always fully inside the viewport. One rect read, one style
+     * write — no layout thrash, nothing per-mousemove.
+     */
+    function positionPanel(anchorEl) {
+      if (!els.panel || !anchorEl || userMoved) return;
+      const gap = 12;
+      const margin = 8;
+      const r = anchorEl.getBoundingClientRect();
+      const pw = els.panel.offsetWidth || 320;
+      const ph = els.panel.offsetHeight || 240;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+
+      let left;
+      let top = r.top;
+      if (r.right + gap + pw + margin <= vw) left = r.right + gap;
+      else if (r.left - gap - pw >= margin) left = r.left - gap - pw;
+      else {
+        left = r.left;
+        top = r.bottom + gap + ph + margin <= vh ? r.bottom + gap : r.top - gap - ph;
+      }
+      els.panel.style.left = clamp(left, margin, Math.max(margin, vw - pw - margin)) + "px";
+      els.panel.style.top = clamp(top, margin, Math.max(margin, vh - ph - margin)) + "px";
+    }
+
+    function clamp(value, low, high) {
+      return value < low ? low : value > high ? high : value;
+    }
+
+    function onDragStart(e) {
+      if (e.target && e.target.classList && e.target.classList.contains("te-close")) return;
+      const r = els.panel.getBoundingClientRect();
+      dragFrom = { x: e.clientX, y: e.clientY, left: r.left, top: r.top };
+      userMoved = true;
+      e.preventDefault();
+      document.addEventListener("mousemove", onDragMove, true);
+      document.addEventListener("mouseup", endDrag, true);
+    }
+
+    function onDragMove(e) {
+      if (!dragFrom) return;
+      const pw = els.panel.offsetWidth || 320;
+      const ph = els.panel.offsetHeight || 240;
+      els.panel.style.left =
+        clamp(dragFrom.left + (e.clientX - dragFrom.x), 0, Math.max(0, window.innerWidth - pw)) + "px";
+      els.panel.style.top =
+        clamp(dragFrom.top + (e.clientY - dragFrom.y), 0, Math.max(0, window.innerHeight - ph)) + "px";
+    }
+
+    function endDrag() {
+      dragFrom = null;
+      document.removeEventListener("mousemove", onDragMove, true);
+      document.removeEventListener("mouseup", endDrag, true);
+    }
+
+    // ── breakpoint bar ──────────────────────────────────────────────────
+    function currentBreakpoint(width) {
+      for (const [name, min] of BREAKPOINTS) if (width >= min) return name;
+      return "base";
+    }
+
+    function refreshBreakpoint() {
+      if (!els.bp) return;
+      const width = window.innerWidth;
+      const name = currentBreakpoint(width);
+      els.bp.textContent = name;
+      els.bpWidth.textContent = Math.round(width) + "px";
+      if (!els.vars) return;
+      for (const btn of els.vars.querySelectorAll(".te-var")) {
+        btn.classList.toggle("active", btn.dataset.variant === name);
+      }
+    }
+
+    // ── variant quick-prefixes ──────────────────────────────────────────
+    function renderVariantRow() {
+      if (!els.vars) return;
+      els.vars.textContent = "";
+      for (const variant of VARIANTS) {
+        const btn = document.createElement("button");
+        btn.className = "te-var";
+        btn.dataset.variant = variant;
+        btn.textContent = variant;
+        // mousedown, not click: the input must not blur first.
+        btn.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          applyVariantPrefix(variant);
+        });
+        els.vars.appendChild(btn);
+      }
+    }
+
+    /** Extend the input's variant chain; suggest.js re-attaches it to hits. */
+    function applyVariantPrefix(variant) {
+      const value = els.input.value;
+      const prefix = variant + ":";
+      if (!value.includes(prefix)) {
+        const split = value.lastIndexOf(":");
+        const chain = split >= 0 ? value.slice(0, split + 1) : "";
+        const stub = split >= 0 ? value.slice(split + 1) : value;
+        els.input.value = chain + prefix + stub;
+      }
+      els.input.focus();
+      onInput();
     }
 
     // ── keydown (scoped) ────────────────────────────────────────────────
@@ -304,27 +515,47 @@
     // ── pin / render ────────────────────────────────────────────────────
     function pin(el) {
       pinnedEl = el;
+      userMoved = false; // a fresh pin re-anchors the window
       drawHighlight(el, true);
-      renderTarget();
-      renderChips();
+      positionPanel(el);
+      renderTarget(el);
+      renderChips(el, false);
+      refreshNav();
       refreshEtchBanner();
       els.input.value = "";
       hideDrop();
       els.input.focus();
     }
 
-    function renderTarget() {
-      if (!pinnedEl) return;
-      const tag = pinnedEl.tagName ? pinnedEl.tagName.toLowerCase() : "?";
-      const id = pinnedEl.id ? `#${pinnedEl.id}` : "";
-      els.target.textContent = `${tag}${id}`;
+    function renderTarget(el) {
+      if (!el) return;
+      const tag = el.tagName ? el.tagName.toLowerCase() : "?";
+      const id = el.id ? `#${el.id}` : "";
+      const r = el.getBoundingClientRect();
+      const count = classListOf(el).length;
+      els.target.textContent = "";
+      const head = document.createElement("span");
+      head.textContent = `${tag}${id}`;
+      els.target.appendChild(head);
+      const meta = document.createElement("span");
+      meta.className = "muted";
+      meta.textContent = ` — ${count} class${count === 1 ? "" : "es"} · ${Math.round(r.width)} × ${Math.round(r.height)}px`;
+      els.target.appendChild(meta);
     }
 
-    function renderChips() {
+    /**
+     * One renderer for both modes. Read-only (hover) shows the live classes
+     * with no controls; pinned mode adds the toggle and remove buttons and
+     * folds in the element's remembered off-classes.
+     */
+    function renderChips(el, readOnly) {
       const chips = els.chips;
       chips.textContent = "";
-      if (!pinnedEl) return;
-      const list = classListOf(pinnedEl);
+      chips.classList.toggle("readonly", !!readOnly);
+      if (!el) return;
+      const live = classListOf(el);
+      const off = readOnly ? new Set() : disabledClasses.get(el) || new Set();
+      const list = live.concat([...off].filter((cls) => !live.includes(cls)));
       if (!list.length) {
         const empty = document.createElement("span");
         empty.className = "te-empty";
@@ -333,8 +564,17 @@
         return;
       }
       for (const cls of list) {
+        const isOff = off.has(cls);
         const chip = document.createElement("span");
-        chip.className = "te-chip";
+        chip.className = isOff ? "te-chip off" : "te-chip";
+        if (!readOnly) {
+          const tog = document.createElement("button");
+          tog.className = "tog";
+          tog.textContent = isOff ? "○" : "◉";
+          tog.title = isOff ? "enable class" : "disable class (kept in the list)";
+          tog.addEventListener("click", () => toggleClass(cls));
+          chip.appendChild(tog);
+        }
         const hex = swatchFor(cls);
         if (hex) {
           const sw = document.createElement("span");
@@ -343,15 +583,51 @@
           chip.appendChild(sw);
         }
         const label = document.createElement("span");
+        label.className = "lbl";
         label.textContent = cls;
         chip.appendChild(label);
-        const rm = document.createElement("button");
-        rm.textContent = "×";
-        rm.title = "remove class";
-        rm.addEventListener("click", () => applyRemove(cls));
-        chip.appendChild(rm);
+        if (!readOnly) {
+          const rm = document.createElement("button");
+          rm.textContent = "×";
+          rm.title = "remove class";
+          rm.addEventListener("click", () => applyRemove(cls));
+          chip.appendChild(rm);
+        }
         chips.appendChild(chip);
       }
+    }
+
+    // ── navigator ───────────────────────────────────────────────────────
+    /** Nearest eligible element in a direction, skipping pi-annotate nodes. */
+    function neighbour(el, direction) {
+      if (!el) return null;
+      if (direction === "up") {
+        let node = el.parentElement;
+        while (node && !eligible(node)) node = node.parentElement;
+        return node;
+      }
+      if (direction === "down") {
+        let node = el.firstElementChild;
+        while (node && !eligible(node)) node = node.nextElementSibling;
+        return node;
+      }
+      const step = direction === "next" ? "nextElementSibling" : "previousElementSibling";
+      let node = el[step];
+      while (node && !eligible(node)) node = node[step];
+      return node;
+    }
+
+    function navigate(direction) {
+      const next = neighbour(pinnedEl, direction);
+      if (next) pin(next);
+    }
+
+    function refreshNav() {
+      if (!els.nav) return;
+      els.nav.up.disabled = !neighbour(pinnedEl, "up");
+      els.nav.down.disabled = !neighbour(pinnedEl, "down");
+      els.nav.prev.disabled = !neighbour(pinnedEl, "prev");
+      els.nav.next.disabled = !neighbour(pinnedEl, "next");
     }
 
     // Swatch from the bundled palette (via a throwaway suggestion query preview).
@@ -370,14 +646,44 @@
     function applyAdd(cls) {
       if (!pinnedEl || !cls) return;
       pinnedEl.classList.add(cls); // exactly one class-attribute mutation → one Etch entry
-      renderChips();
+      const off = disabledClasses.get(pinnedEl);
+      if (off) off.delete(cls); // re-adding by hand clears the remembered off state
+      renderChips(pinnedEl, false);
+      renderTarget(pinnedEl);
       refreshEtchBanner();
     }
 
     function applyRemove(cls) {
       if (!pinnedEl || !cls) return;
       pinnedEl.classList.remove(cls); // one class-attribute mutation
-      renderChips();
+      const off = disabledClasses.get(pinnedEl);
+      if (off) off.delete(cls); // × drops it from the union list too
+      renderChips(pinnedEl, false);
+      renderTarget(pinnedEl);
+    }
+
+    /**
+     * Switch a class off without losing it. Still exactly one classList
+     * mutation per action — the "remembered" half lives only in editor memory,
+     * so Etch sees a plain remove (and a plain add when switched back on).
+     */
+    function toggleClass(cls) {
+      if (!pinnedEl || !cls) return;
+      let off = disabledClasses.get(pinnedEl);
+      if (!off) {
+        off = new Set();
+        disabledClasses.set(pinnedEl, off);
+      }
+      if (off.has(cls)) {
+        pinnedEl.classList.add(cls); // one class-attribute mutation
+        off.delete(cls);
+      } else {
+        pinnedEl.classList.remove(cls); // one class-attribute mutation
+        off.add(cls);
+      }
+      renderChips(pinnedEl, false);
+      renderTarget(pinnedEl);
+      refreshEtchBanner();
     }
 
     // ── autocomplete ────────────────────────────────────────────────────
