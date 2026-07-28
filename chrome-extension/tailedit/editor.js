@@ -88,7 +88,6 @@
     .te-tab:hover { color: #e0e0e0; }
     .te-tab.active { color: #8abeb7; border-bottom-color: #8abeb7; }
     .te-pane[hidden] { display: none; }
-    .te-controls-placeholder { padding: 20px 8px; color: #666; font-size: 11px; text-align: center; }
     .te-etch {
       font-size: 11px; padding: 6px 8px; border-radius: 4px; margin-bottom: 8px;
       display: flex; align-items: center; gap: 8px;
@@ -177,6 +176,41 @@
     }
     .te-btn:hover { background: #3a3a4a; }
     .te-hint { margin-top: 8px; color: #666; font-size: 10px; }
+    /* ── Controls pane widgets (Phase C2, plan 409) ─────────────────────── */
+    .te-ctl-section { border: 1px solid #333; border-radius: 4px; margin-bottom: 8px; }
+    .te-ctl-section > summary {
+      cursor: pointer; padding: 6px 8px; font-weight: 600; color: #8abeb7;
+      font-size: 11px; list-style: none;
+    }
+    .te-ctl-section > summary::-webkit-details-marker { display: none; }
+    .te-ctl-section > summary::before { content: "▸ "; }
+    .te-ctl-section[open] > summary::before { content: "▾ "; }
+    .te-ctl-body { padding: 2px 8px 8px; display: flex; flex-direction: column; gap: 6px; }
+    .te-ctl-row { display: flex; align-items: center; gap: 6px; }
+    .te-ctl-row label { flex: 0 0 68px; color: #9a9a9a; font-size: 10px; }
+    .te-ctl-select {
+      flex: 1; min-width: 0; background: #18181e; color: #e0e0e0;
+      border: 1px solid #3f3f46; border-radius: 3px; padding: 3px 4px;
+      font-size: 11px; font-family: ui-monospace, Menlo, Consolas, monospace;
+    }
+    .te-ctl-seg { display: flex; gap: 4px; margin-bottom: 4px; }
+    .te-ctl-seg button {
+      flex: 1; background: #2b2b37; color: #e0e0e0; border: 1px solid #3f3f46;
+      border-radius: 3px; padding: 3px 0; font-size: 11px; cursor: pointer;
+    }
+    .te-ctl-seg button.active { border-color: #8abeb7; color: #8abeb7; }
+    .te-ctl-fam { font-size: 10px; color: #808080; margin: 4px 0 2px; }
+    .te-ctl-swatches { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 4px; }
+    .te-sw {
+      width: 18px; height: 18px; border-radius: 3px; border: 1px solid rgba(0, 0, 0, 0.3);
+      cursor: pointer; padding: 0;
+    }
+    .te-sw.active { outline: 2px solid #8abeb7; outline-offset: 1px; }
+    .te-sw.clear {
+      background: repeating-conic-gradient(#3a3a4a 0% 25%, #2b2b37 0% 50%) 0 0 / 8px 8px;
+      color: #e0e0e0; font-size: 10px; display: flex; align-items: center; justify-content: center;
+    }
+    .te-ctl-empty { color: #666; font-size: 10px; text-align: center; padding: 12px 0; }
   `;
 
   function createTailedit(deps) {
@@ -267,7 +301,7 @@
             <div class="te-hint">Click or Space pins the hovered element · edits mutate the real class attribute (captured by Etch) · off classes are real removals until re-enabled · arbitrary values: any utility + -[value]</div>
           </div>
           <div class="te-pane" data-pane="controls" hidden>
-            <div class="te-controls-placeholder">Visual controls land in Phase C2</div>
+            <div class="te-controls-body"></div>
           </div>
         </div>
         <div class="te-bp-bar"><span class="bp">base</span><span class="w"></span></div>
@@ -298,6 +332,7 @@
         vars: panel.querySelector(".te-vars"),
         bp: panel.querySelector(".te-bp-bar .bp"),
         bpWidth: panel.querySelector(".te-bp-bar .w"),
+        controlsBody: panel.querySelector(".te-controls-body"),
       };
 
       els.close.addEventListener("click", () => disable());
@@ -308,6 +343,7 @@
       els.nav.prev.addEventListener("click", () => navigate("prev"));
       els.nav.next.addEventListener("click", () => navigate("next"));
       renderVariantRow();
+      buildControlsPane(); // widgets are built ONCE per mount, never per pin
       els.input.addEventListener("input", onInput);
       els.input.addEventListener("keydown", onInputKey);
       els.input.addEventListener("blur", () => setTimeout(hideDrop, 120));
@@ -568,6 +604,9 @@
       positionPanel(el);
       renderTarget(el);
       renderChips(el, false);
+      // A fresh pin may already carry classes set by typed input earlier —
+      // reflect them in every mounted widget (plan 409 Step 5).
+      for (const widget of widgets) widget.sync();
       refreshNav();
       refreshEtchBanner();
       els.input.value = "";
@@ -734,6 +773,89 @@
       renderChips(pinnedEl, false);
       renderTarget(pinnedEl);
       refreshEtchBanner();
+    }
+
+    /**
+     * Current unprefixed class matching familyRegex on the pinned element, or
+     * null. Only considers LIVE classes with no variant prefix (anything
+     * containing ":" is rejected) — variant-scoped values stay the typed
+     * input's job (plan 409 Scope).
+     */
+    function readFamily(familyRegex) {
+      if (!pinnedEl) return null;
+      for (const cls of classListOf(pinnedEl)) {
+        if (cls.includes(":")) continue;
+        if (familyRegex.test(cls)) return cls;
+      }
+      return null;
+    }
+
+    /**
+     * Widget entry point (plan 409 Step 1). Exactly one class-attribute
+     * mutation per call:
+     *   present + nextClass → classList.replace (one mutation, not remove+add)
+     *   absent  + nextClass → classList.add
+     *   present + null      → classList.remove
+     *   absent  + null      → no-op, DOM untouched
+     * Same render tail as applyAdd, plus a widget sync so every OTHER widget
+     * reflects the change immediately.
+     */
+    function applyFamily(familyRegex, nextClass) {
+      if (!pinnedEl) return;
+      const current = readFamily(familyRegex);
+      if (current && nextClass) {
+        if (current !== nextClass) pinnedEl.classList.replace(current, nextClass); // one mutation
+      } else if (!current && nextClass) {
+        pinnedEl.classList.add(nextClass); // one mutation
+      } else if (current && !nextClass) {
+        pinnedEl.classList.remove(current); // one mutation
+      } else {
+        return; // absent + null → no-op, do not touch the DOM
+      }
+      renderChips(pinnedEl, false);
+      renderTarget(pinnedEl);
+      refreshEtchBanner();
+      // So every OTHER widget sees a change one of them just made.
+      for (const widget of widgets) widget.sync();
+    }
+
+    // ── Controls pane widgets (Phase C2, plan 409) ──────────────────────
+    const WIDGET_NAMES = ["spacing", "typography", "color"];
+    let widgets = []; // [{ root, sync }], built once per mount()
+
+    /** Built exactly once in mount() — never rebuilt per pin(). */
+    function buildControlsPane() {
+      if (!els.controlsBody) return;
+      els.controlsBody.textContent = "";
+      widgets = [];
+      const ctx = { applyFamily, readFamily, data: ns.data || {}, doc: document };
+      let built = 0;
+      for (const name of WIDGET_NAMES) {
+        const registration = ns.controls && ns.controls[name];
+        if (!registration) continue; // defensive: a load-order slip degrades, not throws
+        const instance = registration.create(ctx);
+        const section = document.createElement("details");
+        section.className = "te-ctl-section";
+        section.open = true;
+        const summary = document.createElement("summary");
+        summary.textContent = registration.title || name;
+        section.appendChild(summary);
+        section.appendChild(instance.root);
+        els.controlsBody.appendChild(section);
+        widgets.push(instance);
+        built++;
+      }
+      if (!built) {
+        const empty = document.createElement("div");
+        empty.className = "te-ctl-empty";
+        empty.textContent = "No visual controls registered.";
+        els.controlsBody.appendChild(empty);
+      }
+      const hint = document.createElement("div");
+      hint.className = "te-hint";
+      hint.textContent =
+        "widgets write unprefixed classes — use the input with a variant prefix (md:, hover:) for responsive edits";
+      els.controlsBody.appendChild(hint);
     }
 
     // ── autocomplete ────────────────────────────────────────────────────
