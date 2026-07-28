@@ -22,10 +22,12 @@
       "matches": ["<all_urls>"],
       "js": [
         "tailedit/tw-default-classes.js",
+        "tailedit/tw-spacing.js",
         "tailedit/controls/spacing.js",
         "tailedit/controls/typography.js",
         "tailedit/controls/color.js",
         "tailedit/suggest.js",
+        "tailedit/overlay.js",
         "tailedit/editor.js",
         "content.js"
       ],

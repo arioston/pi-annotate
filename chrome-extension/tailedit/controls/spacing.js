@@ -8,7 +8,9 @@
  *     input (Phase E carries the variant-target model);
  *   - default-theme scale only, kept in exactly one const, replaced by Phase E.
  *
- * Loaded raw (no bundler) BEFORE editor.js, AFTER tw-default-classes.js.
+ * Loaded raw (no bundler) BEFORE editor.js, AFTER tw-default-classes.js AND
+ * tw-spacing.js (which owns the scale and the family-regex builder — plan
+ * 416 extracted them so the box-model overlay shares exactly one copy).
  * Registers onto the single window.__piTailedit namespace; no other globals.
  */
 (() => {
@@ -16,12 +18,9 @@
   const ns = (window.__piTailedit = window.__piTailedit || {});
   ns.controls = ns.controls || {};
 
-  // Default-theme spacing scale (subset). One const; Phase E replaces this
-  // with the project's own resolved theme.
-  const SCALE = [
-    "0", "px", "0.5", "1", "1.5", "2", "2.5", "3", "3.5", "4", "5", "6",
-    "8", "10", "12", "16", "20", "24",
-  ];
+  // Default-theme spacing scale (subset), owned by tw-spacing.js. One const;
+  // Phase E replaces this with the project's own resolved theme.
+  const SCALE = ns.spacing.SCALE;
 
   const ROWS = [
     { label: "Padding", prefix: "p" },
@@ -41,14 +40,11 @@
     { label: "Gap", prefix: "gap" },
   ];
 
-  function escapeToken(s) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-
-  // Each row's regex is anchored at BOTH ends against the full scale
-  // alternation, so a family never swallows a sibling family's classes —
-  // the collision cases called out in plan 409 all fail to match because the
-  // anchored suffix requires an exact scale token, not merely a shared prefix:
+  // Family-regex builder, owned by tw-spacing.js. Each row's regex is
+  // anchored at BOTH ends against the full scale alternation, so a family
+  // never swallows a sibling family's classes — the collision cases called
+  // out in plan 409 all fail to match because the anchored suffix requires
+  // an exact scale token, not merely a shared prefix:
   //   ^p-(?:0|px|...|24)$   matches "p-4"    but NOT "px-4"   ("px-4" has an
   //                         extra "x" before the dash — the pattern requires
   //                         "p-" immediately followed by a scale token).
@@ -58,10 +54,7 @@
   //   ^gap-(?:0|px|...|24)$ matches "gap-4"  but NOT "gap-x-4"/"gap-y-4"
   //                         (those have an extra "x-"/"y-" segment, so the
   //                         full-string anchor never matches).
-  function familyRegex(prefix) {
-    const alt = SCALE.map(escapeToken).join("|");
-    return new RegExp("^" + escapeToken(prefix) + "-(?:" + alt + ")$");
-  }
+  const familyRegex = ns.spacing.familyRegex;
 
   ns.controls.spacing = {
     title: "Spacing",

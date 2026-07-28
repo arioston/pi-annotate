@@ -211,6 +211,19 @@
       color: #e0e0e0; font-size: 10px; display: flex; align-items: center; justify-content: center;
     }
     .te-ctl-empty { color: #666; font-size: 10px; text-align: center; padding: 12px 0; }
+    /* ── Box-model overlay (Phase D1, plan 416) ─────────────────────────── */
+    .te-ov { position: fixed; inset: 0; pointer-events: none; z-index: 1; display: none; }
+    .te-ov-m, .te-ov-p, .te-ov-c { position: fixed; pointer-events: none; display: none; }
+    .te-ov-m { background: rgba(246, 178, 107, 0.30); }
+    .te-ov-p { background: rgba(147, 196, 125, 0.30); }
+    .te-ov-c { background: rgba(111, 168, 220, 0.18); }
+    .te-ov-label {
+      position: absolute; top: 1px; left: 2px; font-size: 10px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      color: #1e1e24; pointer-events: none; white-space: nowrap; display: none;
+    }
+    .te-ov-label.muted { color: #44444c; font-style: italic; }
+    .te-btn.te-boxmodel.active { border-color: #8abeb7; color: #8abeb7; }
   `;
 
   function createTailedit(deps) {
@@ -222,6 +235,8 @@
 
     let hostEl = null;
     let shadow = null;
+    let overlay = null; // box-model overlay factory instance (Phase D1, plan 416)
+    let boxModelOn = false; // user opt-in, default off — pinned-only when on
     let enabled = false;
     let hoverEl = null;
     let pinnedEl = null;
@@ -268,6 +283,10 @@
       const highlight = document.createElement("div");
       highlight.className = "te-highlight";
 
+      // Load-order slip must degrade, not throw — same defensive pattern
+      // plan 409 used for ns.controls.
+      overlay = ns.createOverlay ? ns.createOverlay({ root: shadow }) : null;
+
       const panel = document.createElement("div");
       panel.className = "te-panel";
       panel.innerHTML = `
@@ -297,6 +316,7 @@
             </div>
             <div class="te-actions">
               <button class="te-btn te-copy">Copy classlist</button>
+              <button class="te-btn te-boxmodel" title="Show margin/padding regions for the pinned element">Box model</button>
             </div>
             <div class="te-hint">Click or Space pins the hovered element · edits mutate the real class attribute (captured by Etch) · off classes are real removals until re-enabled · arbitrary values: any utility + -[value]</div>
           </div>
@@ -321,6 +341,7 @@
         input: panel.querySelector(".te-input"),
         drop: panel.querySelector(".te-drop"),
         copy: panel.querySelector(".te-copy"),
+        boxModel: panel.querySelector(".te-boxmodel"),
         close: panel.querySelector(".te-close"),
         head: panel.querySelector(".te-head"),
         nav: {
@@ -337,6 +358,7 @@
 
       els.close.addEventListener("click", () => disable());
       els.copy.addEventListener("click", copyClasslist);
+      els.boxModel.addEventListener("click", toggleBoxModel);
       els.head.addEventListener("mousedown", onDragStart);
       els.nav.up.addEventListener("click", () => navigate("up"));
       els.nav.down.addEventListener("click", () => navigate("down"));
@@ -373,6 +395,10 @@
       document.addEventListener("click", onPageClick, true);
       window.addEventListener("scroll", updateBoxes, true);
       window.addEventListener("resize", updateBoxes);
+      // Separate resize-only listener: resize legitimately changes computed
+      // spacing (responsive utilities), so it gets a tier-1 recompute, never
+      // the unthrottled scroll path's cheap reposition-only tier.
+      window.addEventListener("resize", onOverlayResize);
     }
 
     function disable() {
@@ -382,6 +408,7 @@
       document.removeEventListener("click", onPageClick, true);
       window.removeEventListener("scroll", updateBoxes, true);
       window.removeEventListener("resize", updateBoxes);
+      window.removeEventListener("resize", onOverlayResize);
       endDrag(); // drops the transient drag listeners if a drag was in flight
       hoverEl = null;
       pinnedEl = null;
@@ -389,6 +416,9 @@
       userMoved = false;
       if (els.highlight) els.highlight.style.display = "none";
       if (els.panel) els.panel.style.display = "none";
+      if (overlay) overlay.setEnabled(false);
+      boxModelOn = false;
+      if (els.boxModel) els.boxModel.classList.remove("active");
       hideDrop();
       setActiveTab("classes");
     }
@@ -404,6 +434,8 @@
 
     function destroy() {
       disable();
+      if (overlay) overlay.destroy();
+      overlay = null;
       hostEl?.remove();
       hostEl = null;
       shadow = null;
@@ -469,6 +501,16 @@
         drawHighlight(hoverEl, false);
       }
       refreshBreakpoint();
+      // Tier 2 ONLY — this is the unthrottled scroll/resize handler. Margin
+      // and padding values don't change on scroll, only screen position, so
+      // this coalesces through rAF and re-reads getBoundingClientRect alone.
+      // getComputedStyle must never be called from this path (plans 280/285).
+      if (overlay) overlay.scheduleReposition();
+    }
+
+    /** resize legitimately changes computed spacing (responsive utilities) — tier 1. */
+    function onOverlayResize() {
+      if (overlay) overlay.recompute();
     }
 
     // ── floating window placement ───────────────────────────────────────
@@ -607,11 +649,24 @@
       // A fresh pin may already carry classes set by typed input earlier —
       // reflect them in every mounted widget (plan 409 Step 5).
       for (const widget of widgets) widget.sync();
+      // New target — tier 1 (plan 416): set it, then recompute its box model.
+      if (overlay) {
+        overlay.setTarget(pinnedEl);
+        overlay.recompute();
+      }
       refreshNav();
       refreshEtchBanner();
       els.input.value = "";
       hideDrop();
       els.input.focus();
+    }
+
+    // ── box-model overlay toggle (Phase D1, plan 416) ──────────────────
+    /** Opt-in, pinned-only — flips the overlay on/off; default is off. */
+    function toggleBoxModel() {
+      boxModelOn = !boxModelOn;
+      if (els.boxModel) els.boxModel.classList.toggle("active", boxModelOn);
+      if (overlay) overlay.setEnabled(boxModelOn);
     }
 
     function renderTarget(el) {
@@ -740,6 +795,7 @@
       renderChips(pinnedEl, false);
       renderTarget(pinnedEl);
       refreshEtchBanner();
+      if (overlay) overlay.recompute(); // typed-input edits change spacing too (plan 416)
     }
 
     function applyRemove(cls) {
@@ -749,6 +805,7 @@
       if (off) off.delete(cls); // × drops it from the union list too
       renderChips(pinnedEl, false);
       renderTarget(pinnedEl);
+      if (overlay) overlay.recompute(); // chip removal edits change spacing too (plan 416)
     }
 
     /**
@@ -773,6 +830,7 @@
       renderChips(pinnedEl, false);
       renderTarget(pinnedEl);
       refreshEtchBanner();
+      if (overlay) overlay.recompute(); // toggling a class off/on changes spacing too (plan 416)
     }
 
     /**
@@ -817,6 +875,7 @@
       refreshEtchBanner();
       // So every OTHER widget sees a change one of them just made.
       for (const widget of widgets) widget.sync();
+      if (overlay) overlay.recompute(); // spacing widget edits change the box model (plan 416)
     }
 
     // ── Controls pane widgets (Phase C2, plan 409) ──────────────────────
