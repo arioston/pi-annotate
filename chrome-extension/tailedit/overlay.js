@@ -114,6 +114,15 @@
         bottom: parseFloat(cs.paddingBottom) || 0,
         left: parseFloat(cs.paddingLeft) || 0,
       };
+      // getBoundingClientRect() returns the BORDER box, not the padding box —
+      // border width has to be read here (tier 1) so reposition() (tier 2)
+      // can derive the padding box without ever calling getComputedStyle.
+      const border = {
+        top: parseFloat(cs.borderTopWidth) || 0,
+        right: parseFloat(cs.borderRightWidth) || 0,
+        bottom: parseFloat(cs.borderBottomWidth) || 0,
+        left: parseFloat(cs.borderLeftWidth) || 0,
+      };
       const labels = {};
       for (const side of SIDE_NAMES) {
         const marginCls = responsibleClass(target, side, "margin");
@@ -123,7 +132,7 @@
         labels["padding:" + side] = paddingCls || Math.round(padding[side]) + "px";
         labels["padding:" + side + ":muted"] = !paddingCls;
       }
-      cache = { margin, padding, labels };
+      cache = { margin, padding, border, labels };
       reposition();
     }
 
@@ -135,32 +144,47 @@
         return;
       }
       container.style.display = "block";
-      const r = target.getBoundingClientRect();
-      const { margin, padding } = cache;
+      const r = target.getBoundingClientRect(); // the BORDER box
+      const { margin, padding, border } = cache;
 
-      // Content box: the element's own border box (border sits between
-      // padding and margin; we draw content as the element rect itself).
-      placeRegion(regions.content, r.left, r.top, r.width, r.height, null, true);
+      // getBoundingClientRect() is the border box. The padding box sits
+      // inset from it by the border width on each side — derive that first,
+      // then place every inner region (padding strips, content) relative to
+      // the padding box, not the raw border-box rect.
+      const padLeft = r.left + border.left;
+      const padTop = r.top + border.top;
+      const padWidth = Math.max(0, r.width - border.left - border.right);
+      const padHeight = Math.max(0, r.height - border.top - border.bottom);
 
-      // Padding regions: thin strips just inside the element's edges.
+      // Content box: the padding box inset by the padding widths.
+      placeRegion(
+        regions.content,
+        padLeft + padding.left, padTop + padding.top,
+        Math.max(0, padWidth - padding.left - padding.right),
+        Math.max(0, padHeight - padding.top - padding.bottom),
+        null, true,
+      );
+
+      // Padding regions: thin strips just inside the padding box's edges
+      // (i.e. just inside the border, which is exactly where padding lives).
       placeRegion(
         regions["padding:top"],
-        r.left, r.top, r.width, padding.top,
+        padLeft, padTop, padWidth, padding.top,
         cache.labels["padding:top"], cache.labels["padding:top:muted"],
       );
       placeRegion(
         regions["padding:bottom"],
-        r.left, r.top + r.height - padding.bottom, r.width, padding.bottom,
+        padLeft, padTop + padHeight - padding.bottom, padWidth, padding.bottom,
         cache.labels["padding:bottom"], cache.labels["padding:bottom:muted"],
       );
       placeRegion(
         regions["padding:left"],
-        r.left, r.top + padding.top, padding.left, Math.max(0, r.height - padding.top - padding.bottom),
+        padLeft, padTop + padding.top, padding.left, Math.max(0, padHeight - padding.top - padding.bottom),
         cache.labels["padding:left"], cache.labels["padding:left:muted"],
       );
       placeRegion(
         regions["padding:right"],
-        r.left + r.width - padding.right, r.top + padding.top, padding.right, Math.max(0, r.height - padding.top - padding.bottom),
+        padLeft + padWidth - padding.right, padTop + padding.top, padding.right, Math.max(0, padHeight - padding.top - padding.bottom),
         cache.labels["padding:right"], cache.labels["padding:right:muted"],
       );
 
