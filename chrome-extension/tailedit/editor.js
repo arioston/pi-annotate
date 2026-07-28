@@ -279,9 +279,14 @@
       els.input.addEventListener("input", onInput);
       els.input.addEventListener("keydown", onInputKey);
       els.input.addEventListener("blur", () => setTimeout(hideDrop, 120));
-      // Keep the panel's own clicks from leaking to the host page.
-      panel.addEventListener("click", (e) => e.stopPropagation(), true);
-      panel.addEventListener("mousemove", (e) => e.stopPropagation(), true);
+      // Keep the panel's own events from leaking to the host page. This MUST
+      // be the bubble phase: a capture-phase stopPropagation() here runs
+      // before the event reaches the button inside the panel, which silently
+      // kills every click control in the editor (close, copy, chip ×, nav,
+      // toggles). Bubbling lets the control handle the event first, then
+      // stops it here on the way out.
+      panel.addEventListener("click", (e) => e.stopPropagation());
+      panel.addEventListener("mousemove", (e) => e.stopPropagation());
 
       document.body.appendChild(hostEl);
     }
