@@ -120,6 +120,56 @@
     return !!(taileditController && taileditController.isActive());
   }
 
+  // Interact mode: annotation stays open with its selections, but stops
+  // intercepting page input so the operator can navigate to the elements they
+  // actually want to annotate (open a menu, switch a tab, expand a row).
+  let interactMode = false;
+
+  function interactActive() {
+    return interactMode;
+  }
+
+  /** True when the event started inside pi-annotate's own chrome. */
+  function fromPiSurface(target) {
+    if (!target || typeof target.closest !== "function") return false;
+    return !!(target.closest("#pi-panel") || target.closest(".pi-note-card") || target.closest("#pi-tailedit-root"));
+  }
+
+  /**
+   * Keep pi-annotate's own UI events out of the host page.
+   *
+   * The panel lives in the page's DOM, so without this a click on Submit still
+   * reaches the page's document-level listeners — SPAs close menus, route, or
+   * submit forms underneath us. The capture-phase handlers below already skip
+   * panel events, but skipping is not the same as containing them.
+   *
+   * Registered in the BUBBLE phase: the panel's own buttons handle the event
+   * first, and propagation stops before the page ever sees it. Never
+   * preventDefault — typing, checkboxes and text selection must still work.
+   */
+  const CONTAINED_UI_EVENTS = [
+    "click",
+    "dblclick",
+    "mousedown",
+    "mouseup",
+    "pointerdown",
+    "pointerup",
+    "keydown",
+    "keyup",
+    "keypress",
+    "wheel",
+  ];
+
+  function containPiEvent(e) {
+    if (!fromPiSurface(e.target)) return;
+    e.stopPropagation();
+  }
+
+  function addContainmentListeners(el) {
+    if (!el) return;
+    for (const name of CONTAINED_UI_EVENTS) el.addEventListener(name, containPiEvent);
+  }
+
   // Lazily construct the editor, wiring it to Etch via the single-mutation
   // contract (it writes classes to real host elements; capture is unchanged).
   function ensureTailedit() {
@@ -449,6 +499,11 @@
     }
     
     #pi-panel * { box-sizing: border-box; }
+    
+    /* Interact mode: the panel stays usable but visibly steps back, so it is
+       obvious why clicking the page no longer selects anything. */
+    #pi-panel.pi-interacting { opacity: 0.92; border-top: 2px solid var(--pi-accent, #8abeb7); }
+    #pi-panel.pi-interacting .pi-interact-toggle { outline: 1px solid var(--pi-accent, #8abeb7); border-radius: 4px; }
     
     .pi-header {
       display: flex;
@@ -825,6 +880,7 @@
 
     const taileditCheckbox = document.getElementById("pi-tailedit-mode");
     if (taileditCheckbox) taileditCheckbox.checked = false;
+    setInteractMode(false);
 
     // Update count
     const countEl = document.getElementById("pi-count");
@@ -836,6 +892,7 @@
   function deactivate() {
     if (!isActive) return;
     isActive = false;
+    interactMode = false;
     
     document.removeEventListener("mousemove", onMouseMove, true);
     document.removeEventListener("click", onClick, true);
@@ -929,7 +986,7 @@
     panelEl.innerHTML = `
       <div class="pi-header">
         <span class="pi-logo">π Annotate</span>
-        <span class="pi-hint">Click elements • ${ALT_KEY_LABEL}+scroll cycles parents • ESC to close</span>
+        <span class="pi-hint" id="pi-hint">Click elements • ${ALT_KEY_LABEL}+scroll cycles parents • ${ALT_KEY_LABEL}+I to interact • ESC to close</span>
         <button class="pi-close" id="pi-close" title="Close (ESC)">×</button>
       </div>
       <div class="pi-toolbar">
@@ -962,6 +1019,10 @@
           <input type="checkbox" id="pi-tailedit-mode" />
           <span>Edit</span>
         </label>
+        <label class="pi-notes-toggle pi-interact-toggle" title="Interact with the page (${ALT_KEY_LABEL}+I): stop capturing clicks so you can navigate to what you want to annotate. Selections are kept.">
+          <input type="checkbox" id="pi-interact-mode" />
+          <span>Interact</span>
+        </label>
       </div>
       <div class="pi-context-row">
         <input type="text" id="pi-context" placeholder="General context (optional)..." />
@@ -974,6 +1035,8 @@
       </div>
     `;
     document.body.appendChild(panelEl);
+    // Contain the panel's own events so they never reach the host page.
+    addContainmentListeners(panelEl);
     
     document.getElementById("pi-close").addEventListener("click", handleCancel);
     document.getElementById("pi-cancel").addEventListener("click", handleCancel);
@@ -1026,17 +1089,44 @@
       }
     });
     
-    // Stop events from reaching the page
+    document.getElementById("pi-interact-mode").addEventListener("change", (e) => {
+      setInteractMode(e.target.checked);
+    });
+    
+    // Hover containment stays in the capture phase — nothing inside the panel
+    // needs to see mousemove, and the page must not track the cursor over us.
     panelEl.addEventListener("mousemove", e => e.stopPropagation(), true);
-    panelEl.addEventListener("click", e => {
-      const target = e.target;
-      if (target.tagName === "BUTTON" || target.tagName === "INPUT" || target.tagName === "TEXTAREA") {
-        return;
-      }
-      e.stopPropagation();
-    }, true);
+    // Click containment is handled by addContainmentListeners() in the BUBBLE
+    // phase. It used to live here in capture, which forced an exemption for
+    // BUTTON/INPUT/TEXTAREA so the panel's own controls could still react —
+    // and that exemption is precisely why clicking Submit also reached the
+    // host page's listeners.
   }
   
+  /**
+   * Suspend or resume element picking without ending the session.
+   *
+   * Selections, comments and screenshots are all kept — this only decides
+   * whether pi-annotate consumes page input. The highlight and tooltip are
+   * hidden while suspended so the page looks untouched.
+   */
+  function setInteractMode(enabled) {
+    interactMode = !!enabled;
+    const checkbox = document.getElementById("pi-interact-mode");
+    if (checkbox) checkbox.checked = interactMode;
+    if (panelEl) panelEl.classList.toggle("pi-interacting", interactMode);
+    const hint = document.getElementById("pi-hint");
+    if (hint) {
+      hint.textContent = interactMode
+        ? `Interacting with the page — ${ALT_KEY_LABEL}+I to resume annotating`
+        : `Click elements • ${ALT_KEY_LABEL}+scroll cycles parents • ${ALT_KEY_LABEL}+I to interact • ESC to close`;
+    }
+    if (interactMode) {
+      hideHighlight();
+      hideTooltip();
+    }
+  }
+
   function setMultiMode(isMulti) {
     multiSelectMode = isMulti;
     const singleBtn = document.getElementById("pi-mode-single");
@@ -1166,6 +1256,9 @@
     
     const card = document.createElement("div");
     card.className = "pi-note-card";
+    // Same containment as the panel: a comment box lives in the page's DOM, so
+    // keystrokes and clicks would otherwise reach the host page's handlers.
+    addContainmentListeners(card);
     card.dataset.index = index;
     card.style.left = `${adjustedPos.x}px`;
     card.style.top = `${adjustedPos.y}px`;
@@ -1595,7 +1688,7 @@
   
   function onMouseMove(e) {
     // While the shadow class editor is active it owns hover-inspect (plan 283).
-    if (taileditActive()) {
+    if (taileditActive() || interactActive()) {
       hideHighlight();
       hideTooltip();
       return;
@@ -1633,7 +1726,7 @@
   }
   
   function onWheel(e) {
-    if (taileditActive()) return;
+    if (taileditActive() || interactActive()) return;
     if (!isActive || !elementStack.length || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) return;
     
     if (!e.altKey) return;
@@ -1651,7 +1744,8 @@
   
   function onClick(e) {
     // Editing mode: don't hijack page clicks for annotation selection (plan 283).
-    if (taileditActive()) return;
+    // Interact mode: the operator is driving the page, not picking elements.
+    if (taileditActive() || interactActive()) return;
     if (!isActive || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) return;
     
     e.preventDefault();
@@ -1693,6 +1787,18 @@
     // Keydown scoping (plan 283): events retargeted to the editor's shadow host
     // belong to the class editor (typing/Escape in its input) — don't cancel.
     if (e.target && e.target.id === "pi-tailedit-root") return;
+    // Alt+I flips between annotating and driving the page. Deliberately still
+    // handled while interacting, otherwise there would be no keyboard way back.
+    if (e.altKey && (e.key === "i" || e.key === "I" || e.code === "KeyI")) {
+      e.preventDefault();
+      e.stopPropagation();
+      setInteractMode(!interactMode);
+      return;
+    }
+    // While interacting, the page owns the keyboard — except for the toggle
+    // above. Escape must not tear down a session the operator is mid-way
+    // through just because they pressed it in a page dialog.
+    if (interactActive()) return;
     if (e.key === "Escape") {
       e.preventDefault();
       handleCancel();
