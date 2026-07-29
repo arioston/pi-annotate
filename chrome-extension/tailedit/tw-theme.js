@@ -134,11 +134,30 @@
     // are never enumerable from :root (`--spacing-4` does not exist) and
     // stay bundled in tw-spacing.js's SCALE regardless of this result.
     const spacingRaw = styles.getPropertyValue(SPACING_ANCHOR).trim();
-    families.spacing = spacingRaw
-      ? { live: true, base: spacingRaw, source: "page" }
-      : { live: false, base: DEFAULT_SPACING_BASE, source: "bundled" };
+    const spacingBase = spacingRaw || DEFAULT_SPACING_BASE;
+    families.spacing = {
+      live: !!spacingRaw,
+      base: spacingBase,
+      // Resolved here, inside the single reader, because the root font size is
+      // already in hand. Consumers that need px (plan 423's measuring lines)
+      // must take this rather than calling getComputedStyle themselves — the
+      // single-reader gate is what keeps the Primer/Bootstrap false-positive
+      // analysis in one auditable place.
+      basePx: parseLengthToPx(spacingBase, rootFontSizePx),
+      source: spacingRaw ? "page" : "bundled",
+    };
 
-    return { families, resolvedAt: Date.now() };
+    // Version is a CONSEQUENCE of the per-family anchor probing above, not a
+    // separate heuristic: if any canonical Tailwind property resolved, this is
+    // a Tailwind v4 page. There is deliberately no "v3" verdict — spike 418
+    // showed the naive v3 sniff false-positives (Bootstrap's own `.p-4`
+    // reports 1.5rem and trips it), so a page with no anchors is "unknown" and
+    // consumers fall back to the v3-shaped bundled data, i.e. exactly the
+    // behaviour that predates this module.
+    const anyAnchor =
+      !!spacingRaw || Object.keys(FAMILY_DEFS).some((name) => families[name].live);
+
+    return { families, version: anyAnchor ? "v4" : "unknown", resolvedAt: Date.now() };
   }
 
   ns.createTheme = function createTheme() {
@@ -156,6 +175,16 @@
 
     function isLive(name) {
       return !!family(name).live;
+    }
+
+    /**
+     * "v4" when any canonical anchor resolved on this page, "unknown"
+     * otherwise. Callers use this to pick a bundled dataset (plan 422); it is
+     * never a claim that an "unknown" page is v3, only that nothing here can
+     * prove it is v4.
+     */
+    function version() {
+      return resolve().version;
     }
 
     function stats() {
@@ -189,6 +218,6 @@
       };
     }
 
-    return { resolve, family, isLive, stats, refresh, synthesizeSpacing };
+    return { resolve, family, isLive, version, stats, refresh, synthesizeSpacing };
   };
 })();

@@ -241,6 +241,7 @@
     let shadow = null;
     let overlay = null; // box-model overlay factory instance (Phase D1, plan 416)
     let theme = null; // live per-family theme resolver (Phase E, plan 421), built once in mount()
+    let dataset = null; // bundled v3-or-v4 class data (plan 422), selected once in mount()
     let boxModelOn = false; // user opt-in, default off — pinned-only when on
     let enabled = false;
     let hoverEl = null;
@@ -298,6 +299,15 @@
       // the cache — nothing re-probes the page per pin or per render.
       theme = ns.createTheme ? ns.createTheme() : null;
       if (theme) theme.resolve();
+
+      // Bundled-dataset selection (plan 422), decided ONCE per mount from the
+      // resolver's version verdict. "v4" means a canonical Tailwind anchor
+      // resolved on :root; anything else — including a v3 page and a
+      // non-Tailwind page — keeps the v3-shaped dataset, which is the
+      // behaviour that predates this. The v4 dataset matters because v4
+      // renamed the radius/shadow/blur scales rather than only extending them.
+      dataset = (theme && theme.version() === "v4" && ns.dataV4) || ns.data || {};
+      if (suggest) suggest.configure({ data: dataset, version: theme ? theme.version() : "unknown" });
 
       const panel = document.createElement("div");
       panel.className = "te-panel";
@@ -976,7 +986,7 @@
       if (!els.controlsBody) return;
       els.controlsBody.textContent = "";
       widgets = [];
-      const ctx = { applyFamily, readFamily, data: ns.data || {}, doc: document, theme };
+      const ctx = { applyFamily, readFamily, data: dataset || ns.data || {}, doc: document, theme };
       let built = 0;
       for (const name of WIDGET_NAMES) {
         const registration = ns.controls && ns.controls[name];

@@ -76,7 +76,17 @@
   };
   const TEXT_SIZES = { xs: "0.75rem", sm: "0.875rem", base: "1rem", lg: "1.125rem", xl: "1.25rem", "2xl": "1.5rem", "3xl": "1.875rem", "4xl": "2.25rem", "5xl": "3rem", "6xl": "3.75rem", "7xl": "4.5rem", "8xl": "6rem", "9xl": "8rem" };
   const FONT_WEIGHTS = { thin: 100, extralight: 200, light: 300, normal: 400, medium: 500, semibold: 600, bold: 700, extrabold: 800, black: 900 };
-  const RADII = { none: "0px", sm: "0.125rem", "": "0.25rem", md: "0.375rem", lg: "0.5rem", xl: "0.75rem", "2xl": "1rem", "3xl": "1.5rem", full: "9999px" };
+  // The radius scale is the one explainer table that v4 actually changed: the
+  // names shifted one step down, so v3's `rounded-sm` (0.125rem) is v4's
+  // `rounded-xs`, and v4's `rounded-sm` is 0.25rem. Explaining `rounded-sm` as
+  // 0.125rem on a v4 page is a wrong answer, not a missing one (plan 422).
+  // TEXT_SIZES and FONT_WEIGHTS above are byte-identical across v3 and v4 and
+  // are deliberately NOT duplicated here.
+  const RADII_V3 = { none: "0px", sm: "0.125rem", "": "0.25rem", md: "0.375rem", lg: "0.5rem", xl: "0.75rem", "2xl": "1rem", "3xl": "1.5rem", full: "9999px" };
+  // `none`/`full` are static values in v4's border-radius utility, not theme
+  // entries: verified in tailwindcss@4.3.3's own dist/lib.mjs —
+  // `staticValues:{none:…"0", full:…"calc(infinity * 1px)"}`.
+  const RADII_V4 = { none: "0", xs: "0.125rem", sm: "0.25rem", "": "0.25rem", md: "0.375rem", lg: "0.5rem", xl: "0.75rem", "2xl": "1rem", "3xl": "1.5rem", "4xl": "2rem", full: "calc(infinity * 1px)" };
   // class tokens inside a selector, e.g. `.md\:bg-blue-500:hover` → md:bg-blue-500
   const CLASS_TOKEN_RE = /\.((?:\\.|[-\w[\]#.%/])+)/g;
 
@@ -88,8 +98,15 @@
   }
 
   function createSuggestionIndex() {
-    const colors = ns.data?.colors || {};
-    const colorPrefixes = new Set(ns.data?.colorPrefixes || []);
+    // Dataset and version are configurable (plan 422) because the caller can
+    // only choose between the v3 and v4 bundled datasets after the theme
+    // resolver has read :root, which happens in mount() — later than this
+    // factory runs. configure() must therefore be called before the first
+    // ensureBuilt(); after a build these are frozen into the index.
+    let dataset = ns.data || {};
+    let version = "unknown";
+    let colors = dataset.colors || {};
+    let colorPrefixes = new Set(dataset.colorPrefixes || []);
     let built = false;
     let scanned = false;
     let scanStats = { truncated: false, rulesScanned: 0, sheetsScanned: 0, sheetsSkipped: 0, elapsedMs: 0 };
@@ -178,7 +195,8 @@
 
       if (prefix === "text" && TEXT_SIZES[value]) return `font-size: ${TEXT_SIZES[value]}`;
       if (prefix === "font" && FONT_WEIGHTS[value]) return `font-weight: ${FONT_WEIGHTS[value]}`;
-      if (prefix === "rounded" && Object.prototype.hasOwnProperty.call(RADII, value)) return `border-radius: ${RADII[value]}`;
+      const radii = version === "v4" ? RADII_V4 : RADII_V3;
+      if (prefix === "rounded" && Object.prototype.hasOwnProperty.call(radii, value)) return `border-radius: ${radii[value]}`;
       return "";
     }
 
@@ -216,7 +234,22 @@
       for (const family of Object.keys(colors)) {
         for (const p of colorPrefixes) addEntry(`${p}-${family}`, "static");
       }
-      for (const u of ns.data?.utilities || []) addEntry(u, "static");
+      for (const u of dataset.utilities || []) addEntry(u, "static");
+    }
+
+    /**
+     * Point the index at a bundled dataset and record which Tailwind major it
+     * came from. No-op once the static index is built — a mid-session swap
+     * would leave half the entries from each vocabulary.
+     */
+    function configure(opts) {
+      if (built || !opts) return;
+      if (opts.data) {
+        dataset = opts.data;
+        colors = dataset.colors || {};
+        colorPrefixes = new Set(dataset.colorPrefixes || []);
+      }
+      if (opts.version) version = opts.version;
     }
 
     // Selector-text-only scan of one sheet's rule list, with no parent-rule
@@ -380,7 +413,7 @@
       return { ...scanStats };
     }
 
-    return { ensureBuilt, query, explain, stats };
+    return { configure, ensureBuilt, query, explain, stats };
   }
 
   ns.createSuggestionIndex = createSuggestionIndex;
