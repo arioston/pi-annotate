@@ -30,6 +30,7 @@
         "tailedit/controls/color.js",
         "tailedit/suggest.js",
         "tailedit/overlay.js",
+        "tailedit/guides.js",
         "tailedit/editor.js",
         "content.js"
       ],

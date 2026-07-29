@@ -228,6 +228,19 @@
     }
     .te-ov-label.muted { color: #44444c; font-style: italic; }
     .te-btn.te-boxmodel.active { border-color: #8abeb7; color: #8abeb7; }
+    /* ── Guidelines / measuring lines (Phase D3, plan 423) ───────────────── */
+    .te-gd { position: fixed; inset: 0; pointer-events: none; z-index: 1; display: none; }
+    .te-gd-line, .te-gd-align { position: fixed; pointer-events: none; display: none; }
+    .te-gd-line { background: #d18ec2; }
+    .te-gd-align { border-left: 1px dashed rgba(209, 142, 194, 0.55); border-top: 1px dashed rgba(209, 142, 194, 0.55); }
+    .te-gd-label {
+      position: absolute; top: -14px; left: 50%; transform: translateX(-50%);
+      font-size: 10px; font-family: ui-monospace, Menlo, Consolas, monospace;
+      color: #f5f5f7; background: rgba(30, 30, 36, 0.85); padding: 0 3px;
+      border-radius: 2px; pointer-events: none; white-space: nowrap;
+    }
+    .te-gd-steps { color: #9a9a9a; font-style: italic; }
+    .te-btn.te-measure.active { border-color: #d18ec2; color: #d18ec2; }
   `;
 
   function createTailedit(deps) {
@@ -243,6 +256,8 @@
     let theme = null; // live per-family theme resolver (Phase E, plan 421), built once in mount()
     let dataset = null; // bundled v3-or-v4 class data (plan 422), selected once in mount()
     let boxModelOn = false; // user opt-in, default off — pinned-only when on
+    let guides = null; // guidelines / measuring lines factory instance (Phase D3, plan 423)
+    let measureOn = false; // user opt-in, default off — needs a pin plus a hovered probe
     let enabled = false;
     let hoverEl = null;
     let pinnedEl = null;
@@ -292,6 +307,13 @@
       // Load-order slip must degrade, not throw — same defensive pattern
       // plan 409 used for ns.controls.
       overlay = ns.createOverlay ? ns.createOverlay({ root: shadow }) : null;
+      // Guides take the spacing base from the theme resolver rather than
+      // probing :root themselves — tw-theme.js stays the single reader
+      // (plans 421/422). Reading it lazily keeps the resolver's own
+      // once-per-mount cache authoritative.
+      guides = ns.createGuides
+        ? ns.createGuides({ root: shadow, getBasePx: () => (theme ? theme.family("spacing").basePx : null) })
+        : null;
 
       // Resolved ONCE per mount (Phase E, plan 421): theme.resolve() reads
       // :root a single time and caches the result. Every later caller
@@ -340,6 +362,7 @@
               <button class="te-btn te-copy">Copy classlist</button>
               <button class="te-btn te-copy-el">Copy element</button>
               <button class="te-btn te-boxmodel" title="Show margin/padding regions for the pinned element">Box model</button>
+              <button class="te-btn te-measure" title="Measure distance from the pinned element to whatever you hover">Measure</button>
             </div>
             <div class="te-hint">Click or Space pins the hovered element · edits mutate the real class attribute (captured by Etch) · off classes are real removals until re-enabled · arbitrary values: any utility + -[value]</div>
             <details class="te-ctl-section te-view">
@@ -381,6 +404,7 @@
         copy: panel.querySelector(".te-copy"),
         copyEl: panel.querySelector(".te-copy-el"),
         boxModel: panel.querySelector(".te-boxmodel"),
+        measure: panel.querySelector(".te-measure"),
         hlWidth: panel.querySelector(".te-hl-width"),
         hlWidthVal: panel.querySelector(".te-hl-width-val"),
         panelOp: panel.querySelector(".te-panel-op"),
@@ -403,6 +427,7 @@
       els.copy.addEventListener("click", copyClasslist);
       els.copyEl.addEventListener("click", copyElement);
       els.boxModel.addEventListener("click", toggleBoxModel);
+      els.measure.addEventListener("click", toggleMeasure);
       els.hlWidth.addEventListener("input", () => applyHighlightWidth(Number(els.hlWidth.value)));
       els.panelOp.addEventListener("input", () => applyPanelOpacity(Number(els.panelOp.value)));
       applyHighlightWidth(Number(els.hlWidth.value));
@@ -467,6 +492,9 @@
       if (overlay) overlay.setEnabled(false);
       boxModelOn = false;
       if (els.boxModel) els.boxModel.classList.remove("active");
+      if (guides) guides.setEnabled(false);
+      measureOn = false;
+      if (els.measure) els.measure.classList.remove("active");
       if (els.hlWidth) els.hlWidth.value = "2";
       applyHighlightWidth(2);
       if (els.panelOp) els.panelOp.value = "100";
@@ -488,6 +516,8 @@
       disable();
       if (overlay) overlay.destroy();
       overlay = null;
+      if (guides) guides.destroy();
+      guides = null;
       theme = null; // no teardown needed — it never subscribed to anything
       hostEl?.remove();
       hostEl = null;
@@ -511,7 +541,15 @@
         return;
       }
       hoverEl = el;
-      if (pinnedEl) return;
+      if (pinnedEl) {
+        // Measuring is the ONE reason hover tracking continues after a pin.
+        // Everything else stays exactly as it was: the highlight does not
+        // follow the mouse, the panel does not re-render, renderTarget is not
+        // called. Only the probe moves, and guides.setProbe() no-ops unless
+        // the element actually changed.
+        if (measureOn && guides && el !== pinnedEl) guides.setProbe(el);
+        return;
+      }
       drawHighlight(el, false);
       // Re-render only on a real target change — never per mousemove.
       if (el !== renderedHoverEl) {
@@ -559,6 +597,9 @@
       // this coalesces through rAF and re-reads getBoundingClientRect alone.
       // getComputedStyle must never be called from this path (plans 280/285).
       if (overlay) overlay.scheduleReposition();
+      // Guides are tier-2 only by construction — this is their entire refresh
+      // path, and it costs two getBoundingClientRect calls per frame at most.
+      if (guides) guides.scheduleReposition();
     }
 
     /** resize legitimately changes computed spacing (responsive utilities) — tier 1. */
@@ -753,6 +794,8 @@
         overlay.setTarget(pinnedEl);
         overlay.recompute();
       }
+      // A fresh pin re-anchors the measurement and drops the old probe.
+      if (guides) guides.setAnchor(pinnedEl);
       refreshNav();
       refreshEtchBanner();
       els.input.value = "";
@@ -766,6 +809,20 @@
       boxModelOn = !boxModelOn;
       if (els.boxModel) els.boxModel.classList.toggle("active", boxModelOn);
       if (overlay) overlay.setEnabled(boxModelOn);
+    }
+
+    // ── guidelines / measuring lines toggle (Phase D3, plan 423) ────────
+    /**
+     * Opt-in, and independent of the box model — both may be on at once.
+     * Turning this on is also what re-opens hover tracking while pinned; see
+     * onMove.
+     */
+    function toggleMeasure() {
+      measureOn = !measureOn;
+      if (els.measure) els.measure.classList.toggle("active", measureOn);
+      if (!guides) return;
+      if (measureOn && pinnedEl) guides.setAnchor(pinnedEl);
+      guides.setEnabled(measureOn);
     }
 
     function renderTarget(el) {
