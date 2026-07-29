@@ -3,7 +3,10 @@
  *
  * Standalone, throwaway. NOT wired into the extension, NOT in the manifest.
  * Paste into any page's DevTools console. Takes no arguments, mutates
- * nothing, only console.log's a structured report. Mirrors the budget shape
+ * nothing, only console.log's a structured report — including :root custom
+ * property VALUES (not just names), and a targeted v4ScaleShape check for
+ * whether Tailwind v4's spacing scale is discrete (--spacing-4, ...) or a
+ * single base value meant to be derived via calc(). Mirrors the budget shape
  * of chrome-extension/tailedit/suggest.js (MAX_SHEET_RULES) but does not
  * import or depend on the extension.
  */
@@ -33,9 +36,17 @@
     return dash === -1 ? body : body.slice(0, dash);
   }
 
-  // --- 2. :root custom properties ---
-  function scanRootCustomProps() {
-    const cs = getComputedStyle(document.documentElement);
+  const SAMPLE_SIZE = 8;
+  const FULL_LIST_GROUPS = new Set(["--color-", "--spacing"]);
+  const FULL_LIST_CAP = 400;
+  const VALUE_TRUNCATE = 80;
+
+  function truncateValue(v) {
+    return v.length > VALUE_TRUNCATE ? `${v.slice(0, VALUE_TRUNCATE)}…` : v;
+  }
+
+  // --- 2. :root custom properties (names AND values) ---
+  function scanRootCustomProps(cs) {
     const groups = {};
     for (const g of V4_PREFIX_GROUPS) groups[g] = [];
     const other = [];
@@ -44,14 +55,45 @@
       const prop = cs[i];
       if (!prop || !prop.startsWith("--")) continue;
       total++;
+      const value = truncateValue(cs.getPropertyValue(prop).trim());
       const group = V4_PREFIX_GROUPS.find((p) => prop.startsWith(p));
-      (group ? groups[group] : other).push(prop);
+      (group ? groups[group] : other).push({ name: prop, value });
     }
     const summary = {};
+    const fullNameLists = {};
     for (const g of V4_PREFIX_GROUPS) {
-      summary[g] = { count: groups[g].length, samples: groups[g].slice(0, 5) };
+      const entries = groups[g];
+      summary[g] = {
+        count: entries.length,
+        samples: entries.slice(0, SAMPLE_SIZE).map((e) => `${e.name}: ${e.value}`),
+      };
+      if (FULL_LIST_GROUPS.has(g)) {
+        const names = entries.map((e) => e.name);
+        fullNameLists[g] = { names: names.slice(0, FULL_LIST_CAP), truncated: names.length > FULL_LIST_CAP };
+      }
     }
-    return { total, byPrefix: summary, otherCount: other.length, otherSamples: other.slice(0, 5) };
+    return {
+      total, byPrefix: summary, fullNameLists,
+      otherCount: other.length,
+      otherSamples: other.slice(0, SAMPLE_SIZE).map((e) => `${e.name}: ${e.value}`),
+    };
+  }
+
+  // --- targeted v4 scale-shape probe: is the spacing scale discrete or a
+  // single base value derived via calc()? This one boolean flips the
+  // spacing-half recommendation between GO and NO-GO — see plan 418 §2/§4.
+  const V4_SCALE_SHAPE_PROPS = [
+    "--spacing", "--spacing-4", "--color-blue-500", "--text-lg",
+    "--font-weight-bold", "--radius-lg", "--breakpoint-md",
+  ];
+
+  function scanV4ScaleShape(cs) {
+    const props = {};
+    for (const name of V4_SCALE_SHAPE_PROPS) {
+      const raw = cs.getPropertyValue(name).trim();
+      props[name] = { defined: raw !== "", value: raw || null };
+    }
+    return { discreteSpacingScale: props["--spacing-4"].defined, props };
   }
 
   // --- 3/4/5. single CSSOM pass: sheet census + utility sample + class tokens
@@ -122,7 +164,9 @@
     };
   }
 
-  const rootProps = scanRootCustomProps();
+  const cs = getComputedStyle(document.documentElement);
+  const rootProps = scanRootCustomProps(cs);
+  const scaleShape = scanV4ScaleShape(cs);
   const cssom = scanCssom();
 
   const v4Evidence = Object.entries(rootProps.byPrefix).filter(([, v]) => v.count > 0).map(([k]) => k);
@@ -135,6 +179,11 @@
 
   const report = {
     url: location.href,
+    // Surfaced near the top: the single most decision-relevant bit in this
+    // report. true only when --spacing-4 resolves to a non-empty value —
+    // i.e. the spacing scale is enumerable from :root, not just derivable.
+    discreteSpacingScale: scaleShape.discreteSpacingScale,
+    v4ScaleShape: scaleShape.props,
     detectedMode: {
       mode, v4EvidencePrefixes: v4Evidence,
       twLikeTokenCountAsV3Evidence: cssom.twLikeTokenCount,

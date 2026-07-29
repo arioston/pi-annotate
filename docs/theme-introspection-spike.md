@@ -59,9 +59,32 @@ needs a DOM and cannot run under Node). It takes no arguments and only
    prefix set — `p-`, `bg-`, `flex`, `rounded-`, etc. — not a bare "any class
    exists" check, precisely because that would false-positive on almost any
    site; see the caveat in the probe's own comments and in §4 below).
-2. `:root` custom properties, grouped by the same prefixes, with count and up
-   to 5 samples per group, iterated off `getComputedStyle`'s own numeric
-   indices as specified in the plan.
+2. `:root` custom properties — **names and values**, grouped by the same
+   prefixes, iterated off `getComputedStyle`'s own numeric indices as
+   specified in the plan, values read via `getPropertyValue(prop).trim()`
+   and truncated at 80 chars so a pathological gradient can't swamp the
+   output. Reports, per group: a count and up to 8 `"--name: value"` samples.
+   For the two groups the "complete enough to drive a widget" question in §1
+   actually turns on — `--color-` and `--spacing` — a separate
+   `fullNameLists` key carries the *full* list of names (not values, to keep
+   output size bounded) up to a 400-entry cap with a `truncated` flag, since
+   a bare count can't distinguish "the full default palette" from "eleven
+   brand colours."
+   - **Targeted scale-shape check** (`v4ScaleShape`, surfaced near the top of
+     the report, not buried): reports `defined`/`value` for exactly
+     `--spacing`, `--spacing-4`, `--color-blue-500`, `--text-lg`,
+     `--font-weight-bold`, `--radius-lg`, `--breakpoint-md` (empty string from
+     `getPropertyValue` counts as not defined). A derived top-level boolean,
+     `discreteSpacingScale`, is `true` only when `--spacing-4` resolves to a
+     non-empty value. This is the single most decision-relevant bit in the
+     report: Tailwind v4 is believed to emit `--spacing` as one base value
+     with the scale derived via `calc(var(--spacing) * N)` rather than
+     discrete `--spacing-4`, `--spacing-8`, etc. If `discreteSpacingScale`
+     comes back `false` on a real v4 page, a widget cannot enumerate the
+     spacing scale from `:root` alone — it would have to synthesise it from
+     the single base value — which flips the spacing half of the
+     recommendation in §5 from GO to NO-GO regardless of what the palette
+     side shows.
 3. Stylesheet census: total sheets, how many threw on `.cssRules` access
    (cross-origin), total rule count walked, and whether any single sheet's
    rule count exceeded `MAX_SHEET_RULES = 4000` (mirroring
