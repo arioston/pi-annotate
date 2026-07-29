@@ -18,9 +18,28 @@ installCmdInput.value = installCmd;
 
 // Platform-aware displays
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+// The shortcut hint must report what Chrome ACTUALLY bound, not what the
+// manifest suggested. Chrome silently declines a suggested_key it cannot
+// assign — on Linux, Ctrl+Shift+P is already Chrome's own "print with system
+// dialog" — leaving the command unbound while this popup cheerfully advertised
+// it. That combination (dead shortcut, plus a Start button that could not
+// render) made the picker unreachable by any route.
 const shortcutEl = document.getElementById('shortcut-key');
 if (shortcutEl) {
-  shortcutEl.textContent = isMac ? '⌘ Shift P' : 'Ctrl+Shift+P';
+  const fallback = isMac ? '⌘ Shift P' : 'Ctrl+Shift+P';
+  shortcutEl.textContent = fallback;
+  if (chrome.commands && chrome.commands.getAll) {
+    chrome.commands.getAll((commands) => {
+      const picker = (commands || []).find((c) => c.name === 'toggle-picker');
+      if (picker && picker.shortcut) {
+        shortcutEl.textContent = picker.shortcut;
+        shortcutEl.title = '';
+      } else {
+        shortcutEl.textContent = 'No shortcut assigned';
+        shortcutEl.title = 'Assign one at chrome://extensions/shortcuts';
+      }
+    });
+  }
 }
 const quitTipEl = document.getElementById('quit-tip');
 if (quitTipEl) {
@@ -70,29 +89,41 @@ document.getElementById('retry-btn')?.addEventListener('click', () => {
   checkConnection();
 });
 
-// Update UI based on connection state
+// Update UI based on connection state.
+//
+// Sections are shown/hidden by toggling the `hidden` CLASS, never by writing
+// an inline style. #ready-section and #trouble-section ship with class="hidden"
+// in the markup, and popup.html's rule is `.hidden { display: none !important }`
+// — an inline `style.display = 'block'` loses to that !important, so the older
+// inline-style version left BOTH sections permanently invisible: the "Start
+// Annotation" button never rendered on a healthy connection, and the
+// troubleshooting detail never rendered on a broken one.
+function show(section, visible) {
+  section.classList.toggle('hidden', !visible);
+}
+
 function setConnected() {
   statusDot.className = 'status-dot connected';
   statusText.textContent = 'Connected';
-  setupSection.style.display = 'none';
-  readySection.style.display = 'block';
-  troubleSection.style.display = 'none';
+  show(setupSection, false);
+  show(readySection, true);
+  show(troubleSection, false);
 }
 
 function setNotInstalled(detail) {
   statusDot.className = 'status-dot';
   statusText.textContent = detail || 'Not installed';
-  setupSection.style.display = 'block';
-  readySection.style.display = 'none';
-  troubleSection.style.display = 'none';
+  show(setupSection, true);
+  show(readySection, false);
+  show(troubleSection, false);
 }
 
 function setTrouble(error) {
   statusDot.className = 'status-dot trouble';
   statusText.textContent = 'Connection issue';
-  setupSection.style.display = 'block';
-  readySection.style.display = 'none';
-  troubleSection.style.display = 'block';
+  show(setupSection, true);
+  show(readySection, false);
+  show(troubleSection, true);
   document.getElementById('trouble-detail').textContent = error || 'Unknown error';
 }
 
@@ -100,9 +131,9 @@ function setChecking() {
   statusDot.className = 'status-dot checking';
   statusText.textContent = 'Checking...';
   // Reset sections to initial state (setup visible, others hidden)
-  setupSection.style.display = 'block';
-  readySection.style.display = 'none';
-  troubleSection.style.display = 'none';
+  show(setupSection, true);
+  show(readySection, false);
+  show(troubleSection, false);
 }
 
 // Check connection through the background service worker.
