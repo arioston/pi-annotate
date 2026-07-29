@@ -240,6 +240,7 @@
     let hostEl = null;
     let shadow = null;
     let overlay = null; // box-model overlay factory instance (Phase D1, plan 416)
+    let theme = null; // live per-family theme resolver (Phase E, plan 421), built once in mount()
     let boxModelOn = false; // user opt-in, default off — pinned-only when on
     let enabled = false;
     let hoverEl = null;
@@ -290,6 +291,13 @@
       // Load-order slip must degrade, not throw — same defensive pattern
       // plan 409 used for ns.controls.
       overlay = ns.createOverlay ? ns.createOverlay({ root: shadow }) : null;
+
+      // Resolved ONCE per mount (Phase E, plan 421): theme.resolve() reads
+      // :root a single time and caches the result. Every later caller
+      // (refreshBreakpoint on scroll/resize, widget creation below) reads
+      // the cache — nothing re-probes the page per pin or per render.
+      theme = ns.createTheme ? ns.createTheme() : null;
+      if (theme) theme.resolve();
 
       const panel = document.createElement("div");
       panel.className = "te-panel";
@@ -470,6 +478,7 @@
       disable();
       if (overlay) overlay.destroy();
       overlay = null;
+      theme = null; // no teardown needed — it never subscribed to anything
       hostEl?.remove();
       hostEl = null;
       shadow = null;
@@ -622,16 +631,46 @@
     }
 
     // ── breakpoint bar ──────────────────────────────────────────────────
-    function currentBreakpoint(width) {
-      for (const [name, min] of BREAKPOINTS) if (width >= min) return name;
+    /**
+     * The page's own live breakpoint scale when its `--breakpoint-*` family
+     * resolves (Phase E, plan 421), else the bundled default. Reads only
+     * the already-cached theme.family() result — no :root access here.
+     */
+    function activeBreakpoints() {
+      if (theme) {
+        const bp = theme.family("breakpoint");
+        if (bp && bp.live && bp.values) {
+          const entries = Object.keys(bp.values).map((name) => [name, bp.values[name]]);
+          if (entries.length) {
+            entries.sort((a, b) => b[1] - a[1]); // descending by px, same shape as BREAKPOINTS
+            return { list: entries, live: true };
+          }
+        }
+      }
+      return { list: BREAKPOINTS, live: false };
+    }
+
+    function currentBreakpoint(width, list) {
+      for (const [name, min] of list) if (width >= min) return name;
       return "base";
     }
 
     function refreshBreakpoint() {
       if (!els.bp) return;
+      const { list, live } = activeBreakpoints();
       const width = window.innerWidth;
-      const name = currentBreakpoint(width);
-      els.bp.textContent = name;
+      const name = currentBreakpoint(width, list);
+      // D6 honesty rule (docs/tailscan-integration-design.md §"Accuracy
+      // contract"): never let a provenance change happen silently. D6's own
+      // spec'd idiom for this bar is a bracketed suffix on the displayed
+      // name (there: "sm (unverified)" for an uncertain default-scale
+      // read). A live page-read scale is the inverse case — certain, but
+      // DIFFERENT from the bundled default a user may expect — so it reuses
+      // the same bracketed-suffix shape rather than inventing new UI.
+      els.bp.textContent = name + (live ? " (live)" : "");
+      els.bp.title = live
+        ? "read from this page's own --breakpoint-* theme values"
+        : "Tailwind's default breakpoint scale";
       els.bpWidth.textContent = Math.round(width) + "px";
       if (!els.vars) return;
       for (const btn of els.vars.querySelectorAll(".te-var")) {
@@ -937,7 +976,7 @@
       if (!els.controlsBody) return;
       els.controlsBody.textContent = "";
       widgets = [];
-      const ctx = { applyFamily, readFamily, data: ns.data || {}, doc: document };
+      const ctx = { applyFamily, readFamily, data: ns.data || {}, doc: document, theme };
       let built = 0;
       for (const name of WIDGET_NAMES) {
         const registration = ns.controls && ns.controls[name];

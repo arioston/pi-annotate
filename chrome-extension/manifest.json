@@ -23,6 +23,7 @@
       "js": [
         "tailedit/tw-spacing.js",
         "tailedit/tw-default-classes.js",
+        "tailedit/tw-theme.js",
         "tailedit/controls/spacing.js",
         "tailedit/controls/typography.js",
         "tailedit/controls/color.js",

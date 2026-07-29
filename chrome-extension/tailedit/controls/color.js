@@ -1,17 +1,27 @@
 /**
- * Pi Annotate — Tailedit color control (Phase C2, plan 409)
+ * Pi Annotate — Tailedit color control (Phase C2, plan 409; Phase E, plan 421)
  *
- * text / bg / border swatch grid for the Controls pane, built from the same
+ * text / bg / border swatch grid for the Controls pane, built from the
  * bundled default palette (ns.data.colors) the typed-input autocomplete
- * already uses (tw-default-classes.js). Per plan 409 Step 4:
+ * already uses (tw-default-classes.js), OR from the page's own live
+ * `--color-*` theme values when available. Per plan 409 Step 4:
  *   - target selector chooses which prefix (`text-`, `bg-`, `border-`) a
  *     swatch click writes;
  *   - the family regex for a target is restricted to KNOWN colour tokens
- *     (ctx.data.colors keys, plus the standalone `transparent` keyword) so it
- *     can never mistake a non-colour utility (`text-lg`, `border-2`) for the
- *     current colour — the same membership discipline as controls/typography.js;
+ *     (the active palette's keys, plus the standalone `transparent` keyword)
+ *     so it can never mistake a non-colour utility (`text-lg`, `border-2`)
+ *     for the current colour — the same membership discipline as
+ *     controls/typography.js;
  *   - swatch `style.background` writes are shadow-root-only (allowed); no
  *     `.style` write ever targets the pinned page element.
+ *
+ * Phase E (plan 421): `ctx.theme.family("color")` supplies the live palette
+ * when the page's `--color-blue-500` canonical anchor resolves; otherwise
+ * this falls back to `ctx.data.colors` exactly as before — this file is the
+ * design's own model for "ask the resolver, don't call getComputedStyle
+ * yourself." Live values may be `oklch()`/`lab()` strings; they are set on
+ * `style.background` as-is and left for the browser to parse, same as any
+ * other colour value here.
  *
  * Loaded raw (no bundler) BEFORE editor.js, AFTER tw-default-classes.js.
  * Registers onto the single window.__piTailedit namespace; no other globals.
@@ -53,7 +63,13 @@
     title: "Color",
     create(ctx) {
       const doc = ctx.doc;
-      const colors = (ctx.data && ctx.data.colors) || {};
+      const theme = ctx.theme;
+      // Live palette when the page's own `--color-*` theme resolves,
+      // falling back to the bundled default otherwise (plan 421 per-family
+      // gating — resolved once here, ctx.theme itself is cached per mount).
+      const colorFamily = theme ? theme.family("color") : null;
+      const colors =
+        (colorFamily && colorFamily.live && colorFamily.values) || (ctx.data && ctx.data.colors) || {};
       const families = buildFamilies(colors);
       // Membership-only token list: every string a swatch can ever apply.
       const COLOR_TOKENS = families.reduce((acc, f) => acc.concat(f.shades.map((s) => s.token)), []);
