@@ -45,6 +45,7 @@
       display: none;
     }
     .te-highlight.pinned { border-color: #f0c674; background: rgba(240, 198, 116, 0.12); }
+    .te-highlight.flat { background: transparent; border-width: 0; }
     .te-panel {
       position: fixed;
       /* Also declared here, not only on :host — the host node is a div, so a
@@ -211,6 +212,9 @@
       color: #e0e0e0; font-size: 10px; display: flex; align-items: center; justify-content: center;
     }
     .te-ctl-empty { color: #666; font-size: 10px; text-align: center; padding: 12px 0; }
+    /* ── View settings row (Phase D2, plan 417) ─────────────────────────── */
+    .te-view .te-ctl-row input[type="range"] { flex: 1; min-width: 0; accent-color: #8abeb7; }
+    .te-view .te-ctl-row span { flex: 0 0 30px; text-align: right; color: #9a9a9a; font-size: 10px; }
     /* ── Box-model overlay (Phase D1, plan 416) ─────────────────────────── */
     .te-ov { position: fixed; inset: 0; pointer-events: none; z-index: 1; display: none; }
     .te-ov-m, .te-ov-p, .te-ov-c { position: fixed; pointer-events: none; display: none; }
@@ -316,9 +320,25 @@
             </div>
             <div class="te-actions">
               <button class="te-btn te-copy">Copy classlist</button>
+              <button class="te-btn te-copy-el">Copy element</button>
               <button class="te-btn te-boxmodel" title="Show margin/padding regions for the pinned element">Box model</button>
             </div>
             <div class="te-hint">Click or Space pins the hovered element · edits mutate the real class attribute (captured by Etch) · off classes are real removals until re-enabled · arbitrary values: any utility + -[value]</div>
+            <details class="te-ctl-section te-view">
+              <summary>View</summary>
+              <div class="te-ctl-body">
+                <div class="te-ctl-row">
+                  <label>Highlight</label>
+                  <input class="te-hl-width" type="range" min="0" max="6" step="1" value="2" />
+                  <span class="te-hl-width-val">2px</span>
+                </div>
+                <div class="te-ctl-row">
+                  <label>Panel opacity</label>
+                  <input class="te-panel-op" type="range" min="40" max="100" step="5" value="100" />
+                  <span class="te-panel-op-val">100%</span>
+                </div>
+              </div>
+            </details>
           </div>
           <div class="te-pane" data-pane="controls" hidden>
             <div class="te-controls-body"></div>
@@ -341,7 +361,12 @@
         input: panel.querySelector(".te-input"),
         drop: panel.querySelector(".te-drop"),
         copy: panel.querySelector(".te-copy"),
+        copyEl: panel.querySelector(".te-copy-el"),
         boxModel: panel.querySelector(".te-boxmodel"),
+        hlWidth: panel.querySelector(".te-hl-width"),
+        hlWidthVal: panel.querySelector(".te-hl-width-val"),
+        panelOp: panel.querySelector(".te-panel-op"),
+        panelOpVal: panel.querySelector(".te-panel-op-val"),
         close: panel.querySelector(".te-close"),
         head: panel.querySelector(".te-head"),
         nav: {
@@ -358,7 +383,12 @@
 
       els.close.addEventListener("click", () => disable());
       els.copy.addEventListener("click", copyClasslist);
+      els.copyEl.addEventListener("click", copyElement);
       els.boxModel.addEventListener("click", toggleBoxModel);
+      els.hlWidth.addEventListener("input", () => applyHighlightWidth(Number(els.hlWidth.value)));
+      els.panelOp.addEventListener("input", () => applyPanelOpacity(Number(els.panelOp.value)));
+      applyHighlightWidth(Number(els.hlWidth.value));
+      applyPanelOpacity(Number(els.panelOp.value));
       els.head.addEventListener("mousedown", onDragStart);
       els.nav.up.addEventListener("click", () => navigate("up"));
       els.nav.down.addEventListener("click", () => navigate("down"));
@@ -419,6 +449,10 @@
       if (overlay) overlay.setEnabled(false);
       boxModelOn = false;
       if (els.boxModel) els.boxModel.classList.remove("active");
+      if (els.hlWidth) els.hlWidth.value = "2";
+      applyHighlightWidth(2);
+      if (els.panelOp) els.panelOp.value = "100";
+      applyPanelOpacity(100);
       hideDrop();
       setActiveTab("classes");
     }
@@ -543,6 +577,22 @@
 
     function clamp(value, low, high) {
       return value < low ? low : value > high ? high : value;
+    }
+
+    // ── view settings (Phase D2, plan 417) ──────────────────────────────
+    /** Adjusts the highlight border thickness; 0 makes it fully invisible. */
+    function applyHighlightWidth(px) {
+      if (!els.highlight) return;
+      els.highlight.style.borderWidth = px + "px";
+      els.highlight.classList.toggle("flat", px === 0);
+      if (els.hlWidthVal) els.hlWidthVal.textContent = px + "px";
+    }
+
+    /** Fades the panel only — never :host, which would also fade the highlight/overlay. */
+    function applyPanelOpacity(percent) {
+      const clamped = clamp(percent, 40, 100);
+      if (els.panel) els.panel.style.opacity = String(clamped / 100);
+      if (els.panelOpVal) els.panelOpVal.textContent = clamped + "%";
     }
 
     function onDragStart(e) {
@@ -1054,6 +1104,20 @@
     function copyClasslist() {
       if (!pinnedEl) return;
       const text = classAttr(pinnedEl);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => {});
+      }
+    }
+
+    function copyElement() {
+      if (!pinnedEl) return;
+      const clone = pinnedEl.cloneNode(true);
+      // Strip pi-annotate's own injected nodes so the clipboard never
+      // receives the tool's markup (see plan 417 design decisions).
+      for (const node of Array.from(clone.querySelectorAll("*"))) {
+        if (isPiElement(node)) node.remove();
+      }
+      const text = clone.outerHTML;
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).catch(() => {});
       }
