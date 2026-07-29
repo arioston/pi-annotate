@@ -7,7 +7,10 @@
  *
  * This is a plain DATA file: it assigns a preformed constant onto the single
  * `window.__piTailedit` namespace and contains no logic. It is loaded as a raw
- * content script (no bundler, no build step) ahead of suggest.js / editor.js.
+ * content script (no bundler, no build step) ahead of suggest.js / editor.js,
+ * and AFTER tw-spacing.js (plan 420 — its spacingScale is derived from
+ * ns.spacing.SCALE, the single shared spacing const, rather than keeping its
+ * own copy).
  * Per the design (§4, D5) the class list is a bundled "JS array" — the loadable
  * form of the design's ".json/JS array" data source.
  */
@@ -120,11 +123,10 @@
 
   // Common non-color default-scale utilities (representative, best-effort per
   // D5 — the host-CSSOM source in suggest.js supplies page-specific classes).
-  const spacingScale = [
-    "0", "px", "0.5", "1", "1.5", "2", "2.5", "3", "3.5", "4", "5", "6",
-    "7", "8", "9", "10", "11", "12", "14", "16", "20", "24", "28", "32",
-    "36", "40", "44", "48", "52", "56", "60", "64", "72", "80", "96",
-  ];
+  // The scale itself is owned by tw-spacing.js (plan 420 — one shared const,
+  // so this utilities list and the widget's family regexes never drift
+  // apart); this module loads AFTER tw-spacing.js precisely so that holds.
+  const spacingScale = ns.spacing.SCALE;
   const spacingPrefixes = [
     "p", "px", "py", "pt", "pr", "pb", "pl", "ps", "pe",
     "m", "mx", "my", "mt", "mr", "mb", "ml", "ms", "me",

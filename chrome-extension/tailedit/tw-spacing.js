@@ -8,19 +8,21 @@
  * const in a second file would let the two drift apart at Phase E — see the
  * design note in plan 416 ("One source of truth for the spacing vocabulary").
  *
- * Loaded raw (no bundler) BEFORE controls/spacing.js and overlay.js, AFTER
- * tw-default-classes.js. Registers onto the single window.__piTailedit
- * namespace; no other globals.
+ * Loaded raw (no bundler) BEFORE tw-default-classes.js, controls/spacing.js,
+ * and overlay.js (plan 420 — tw-default-classes.js now derives its own
+ * spacingScale from ns.spacing.SCALE, so this module must load first).
+ * Registers onto the single window.__piTailedit namespace; no other globals.
  */
 (() => {
   "use strict";
   const ns = (window.__piTailedit = window.__piTailedit || {});
 
-  // Default-theme spacing scale (subset). One const; Phase E replaces this
-  // with the project's own resolved theme.
+  // Default-theme spacing scale (full 35-step Tailwind default). One const;
+  // Phase E replaces this with the project's own resolved theme.
   const SCALE = [
     "0", "px", "0.5", "1", "1.5", "2", "2.5", "3", "3.5", "4", "5", "6",
-    "8", "10", "12", "16", "20", "24",
+    "7", "8", "9", "10", "11", "12", "14", "16", "20", "24", "28", "32",
+    "36", "40", "44", "48", "52", "56", "60", "64", "72", "80", "96",
   ];
 
   function escapeToken(s) {

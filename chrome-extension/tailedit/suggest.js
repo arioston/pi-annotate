@@ -45,7 +45,10 @@
     "space-x", "space-y", "gap-x", "gap-y", "min-w", "max-w", "min-h", "max-h", "ring-offset",
     "background", "border", "rounded", "padding", "margin", "text", "font", "w", "h", "p", "m", "gap",
   ];
-  const SPACING_SCALE = {
+  // rem value for each spacing-scale step, used only to render CSS previews.
+  // This is the sole source of the *values* — Tailwind's own default theme,
+  // never Tailscan's (plan 281 guardrail).
+  const SPACING_SCALE_REM_VALUES = {
     "0": "0px", px: "1px", "0.5": "0.125rem", "1": "0.25rem", "1.5": "0.375rem", "2": "0.5rem",
     "2.5": "0.625rem", "3": "0.75rem", "3.5": "0.875rem", "4": "1rem", "5": "1.25rem",
     "6": "1.5rem", "7": "1.75rem", "8": "2rem", "9": "2.25rem", "10": "2.5rem", "11": "2.75rem",
@@ -53,6 +56,14 @@
     "32": "8rem", "36": "9rem", "40": "10rem", "44": "11rem", "48": "12rem", "52": "13rem",
     "56": "14rem", "60": "15rem", "64": "16rem", "72": "18rem", "80": "20rem", "96": "24rem",
   };
+  // Key set derived from the single shared spacing scale (ns.spacing.SCALE,
+  // owned by tw-spacing.js) so this map can never offer a step the Spacing
+  // widget doesn't also recognize — that mismatch was plan 420's bug. A step
+  // with no known rem value is omitted, never invented.
+  const SPACING_SCALE = {};
+  for (const step of ns.spacing.SCALE) {
+    if (step in SPACING_SCALE_REM_VALUES) SPACING_SCALE[step] = SPACING_SCALE_REM_VALUES[step];
+  }
   const SIZING_KEYWORDS = { full: "100%", screen: "100vw", auto: "auto" };
   const SPACING_PROPERTIES = {
     p: "padding", px: "padding-inline", py: "padding-block", pt: "padding-top", pr: "padding-right",
