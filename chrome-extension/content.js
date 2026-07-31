@@ -766,7 +766,10 @@
         activate();
       }
     } else if (msg.type === "CANCEL") {
-      if (isActive) {
+      const cancelledRequestId = msg.requestId || msg.id || null;
+      // Ignore a late timeout/abort from a session that has already been
+      // replaced by another client on this browser profile.
+      if (isActive && (cancelledRequestId === null || cancelledRequestId === requestId)) {
         deactivate();
       }
     }

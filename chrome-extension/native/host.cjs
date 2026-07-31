@@ -1,15 +1,27 @@
 #!/usr/bin/env node
 const net = require("net");
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const crypto = require("crypto");
 
-const SOCKET_PATH = "/tmp/pi-annotate.sock";
-const TOKEN_PATH = "/tmp/pi-annotate.token";
-const LOG_FILE = "/tmp/pi-annotate-host.log";
+const USER_ID = typeof process.getuid === "function" ? process.getuid() : "user";
+const REGISTRY_DIR = process.env.PI_ANNOTATE_REGISTRY_DIR
+  ? path.resolve(process.env.PI_ANNOTATE_REGISTRY_DIR)
+  : path.join(os.tmpdir(), `pi-annotate-${USER_ID}`);
+const INSTANCE_ID = crypto.randomBytes(12).toString("hex");
+const SOCKET_PATH = path.join(REGISTRY_DIR, `${INSTANCE_ID}.sock`);
+const TOKEN_PATH = path.join(REGISTRY_DIR, `${INSTANCE_ID}.token`);
+const METADATA_PATH = path.join(REGISTRY_DIR, `${INSTANCE_ID}.json`);
+const LOG_FILE = path.join(REGISTRY_DIR, `${INSTANCE_ID}.log`);
 const MAX_NATIVE_MESSAGE_BYTES = 32 * 1024 * 1024; // 32MB (increased from 8MB for edit capture payloads)
 const MAX_SOCKET_BUFFER = 32 * 1024 * 1024; // 32MB
 const MAX_LOG_BYTES = 5 * 1024 * 1024; // 5MB
 
 process.umask(0o077);
+
+fs.mkdirSync(REGISTRY_DIR, { recursive: true, mode: 0o700 });
+fs.chmodSync(REGISTRY_DIR, 0o700);
 
 function reportFsError(action, err) {
   const code = err && typeof err === "object" && "code" in err && typeof err.code === "string" ? err.code : "";
@@ -34,7 +46,7 @@ const log = (msg) => {
   fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`);
 };
 
-log("Host starting...");
+log(`Host starting (instance ${INSTANCE_ID})...`);
 
 // Clean up old socket
 try {
@@ -43,13 +55,36 @@ try {
   reportFsError(`Failed to remove old socket ${SOCKET_PATH}`, err);
 }
 
-// Store connected pi client
-let piSocket = null;
-let piAuthed = false;
+// Multiple agent clients may share this browser profile. Requests are routed
+// back only to the socket that initiated them.
+const piClients = new Set();
+const requestOwners = new Map();
+let activeRequestId = null;
+let lastAgentClient = null;
+const connectedAt = new Date().toISOString();
+let browserMetadata = {
+  id: INSTANCE_ID,
+  name: `Browser ${INSTANCE_ID.slice(0, 6)}`,
+  browser: "Chrome/Chromium",
+};
+
+function publishMetadata() {
+  const metadata = {
+    ...browserMetadata,
+    socketPath: SOCKET_PATH,
+    tokenPath: TOKEN_PATH,
+    pid: process.pid,
+    connectedAt,
+    updatedAt: new Date().toISOString(),
+  };
+  const temporaryPath = `${METADATA_PATH}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(metadata, null, 2), { mode: 0o600 });
+  fs.renameSync(temporaryPath, METADATA_PATH);
+}
 
 function ensureToken() {
   try {
-    const token = require("crypto").randomBytes(32).toString("hex");
+    const token = crypto.randomBytes(32).toString("hex");
     fs.writeFileSync(TOKEN_PATH, token, { mode: 0o600 });
     return token;
   } catch (err) {
@@ -80,10 +115,10 @@ function processInput() {
       return;
     }
     if (inputBuffer.length < 4 + len) break;
-    
+
     const json = inputBuffer.slice(4, 4 + len).toString();
     inputBuffer = inputBuffer.slice(4 + len);
-    
+
     try {
       const msg = JSON.parse(json);
       handleExtensionMessage(msg);
@@ -102,20 +137,56 @@ function redactForLog(msg) {
   });
 }
 
-// Messages from Chrome extension → forward to Pi
+function sendToClient(socket, msg) {
+  if (!socket || socket.destroyed || !socket.piAuthed) return false;
+  socket.write(JSON.stringify(msg) + "\n");
+  return true;
+}
+
+// Messages from Chrome extension → route to the initiating agent client.
 function handleExtensionMessage(msg) {
   log(`From extension: ${redactForLog(msg)}`);
-  
+
+  if (msg?.type === "REGISTER_BROWSER") {
+    const id = typeof msg.id === "string" && msg.id.trim() ? msg.id.trim() : INSTANCE_ID;
+    const name = typeof msg.name === "string" && msg.name.trim()
+      ? msg.name.trim().slice(0, 80)
+      : `Browser ${id.slice(0, 6)}`;
+    const browser = typeof msg.browser === "string" && msg.browser.trim()
+      ? msg.browser.trim().slice(0, 80)
+      : "Chrome/Chromium";
+    browserMetadata = { id, name, browser };
+    try {
+      publishMetadata();
+      writeMessage({ type: "BROWSER_REGISTERED", id, name, browser });
+    } catch (err) {
+      log(`Failed to publish browser metadata: ${err.message}`);
+    }
+    return;
+  }
+
   // Health check - respond immediately without forwarding
   if (msg?.type === "PING") {
     writeMessage({ type: "PONG", timestamp: Date.now() });
     return;
   }
-  
-  if (piSocket && !piSocket.destroyed) {
-    piSocket.write(JSON.stringify(msg) + "\n");
-  } else {
-    log("No pi client connected, message dropped");
+
+  const requestId = typeof msg?.requestId === "number" ? msg.requestId : null;
+  if (requestId !== null && requestOwners.has(requestId)) {
+    const owner = requestOwners.get(requestId);
+    sendToClient(owner, msg);
+    if (msg.type === "ANNOTATIONS_COMPLETE" || msg.type === "CANCEL") {
+      requestOwners.delete(requestId);
+      if (activeRequestId === requestId) activeRequestId = null;
+    }
+    return;
+  }
+
+  // A popup/shortcut session has no request owner. Deliver it to the most
+  // recently active client only, so multiple Pi instances do not all inject
+  // the same annotation as a user message.
+  if (!sendToClient(lastAgentClient, msg)) {
+    log("No authenticated agent client connected, message dropped");
   }
 }
 
@@ -145,6 +216,12 @@ function cleanup() {
     reportFsError(`Failed to remove token ${TOKEN_PATH}`, err);
   }
 
+  try {
+    fs.unlinkSync(METADATA_PATH);
+  } catch (err) {
+    reportFsError(`Failed to remove metadata ${METADATA_PATH}`, err);
+  }
+
   process.exit(0);
 }
 
@@ -155,33 +232,14 @@ process.on("uncaughtException", (err) => {
   cleanup();
 });
 
-// Unix socket server for Pi extension
+// Unix socket server for Pi and MCP clients
 const server = net.createServer((socket) => {
-  log("Pi client connected");
-  
-  // If another Pi client is already connected, replace it
-  if (piSocket && !piSocket.destroyed) {
-    if (piAuthed) {
-      log("Replacing existing authenticated Pi client");
-      try {
-        piSocket.write(JSON.stringify({ 
-          type: "SESSION_REPLACED", 
-          reason: "Another terminal started annotation" 
-        }) + "\n");
-      } catch (e) {
-        log(`Error notifying old client: ${e.message}`);
-      }
-    } else {
-      log("Replacing existing unauthenticated Pi client");
-    }
-    piSocket.destroy();
-  }
-  
-  piSocket = socket;
-  piAuthed = false;
-  
+  log("Agent client connected");
+  piClients.add(socket);
+  socket.piAuthed = false;
+
   let buffer = "";
-  
+
   socket.on("data", (data) => {
     buffer += data.toString();
     if (buffer.length > MAX_SOCKET_BUFFER) {
@@ -192,23 +250,48 @@ const server = net.createServer((socket) => {
     }
     const lines = buffer.split("\n");
     buffer = lines.pop() || "";
-    
+
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const msg = JSON.parse(line);
-        if (!piAuthed) {
+        if (!socket.piAuthed) {
           if (msg?.type === "AUTH" && AUTH_TOKEN && msg.token === AUTH_TOKEN) {
-            piAuthed = true;
-            log("Pi client authenticated");
+            socket.piAuthed = true;
+            lastAgentClient = socket;
+            log("Agent client authenticated");
           } else {
-            log("Pi client authentication failed");
+            log("Agent client authentication failed");
             socket.destroy();
             return;
           }
         } else {
-          // Forward to Chrome extension
-          log(`From Pi: ${redactForLog(msg)}`);
+          lastAgentClient = socket;
+          const requestId = typeof msg?.requestId === "number" ? msg.requestId : null;
+          if (msg?.type === "START_ANNOTATION" && requestId !== null) {
+            if (activeRequestId !== null && activeRequestId !== requestId) {
+              const previousOwner = requestOwners.get(activeRequestId);
+              sendToClient(previousOwner, {
+                type: "SESSION_REPLACED",
+                requestId: activeRequestId,
+                reason: "Another client started annotation in this browser profile",
+              });
+              requestOwners.delete(activeRequestId);
+            }
+            activeRequestId = requestId;
+            requestOwners.set(requestId, socket);
+          } else if (msg?.type === "CANCEL" && requestId !== null) {
+            const owner = requestOwners.get(requestId);
+            if (owner !== socket) {
+              log(`Ignoring CANCEL for request ${requestId} from a stale or non-owner client`);
+              continue;
+            }
+            requestOwners.delete(requestId);
+            if (activeRequestId === requestId) activeRequestId = null;
+          }
+
+          // Forward to Chrome extension.
+          log(`From agent: ${redactForLog(msg)}`);
           writeMessage(msg);
         }
       } catch (e) {
@@ -216,16 +299,23 @@ const server = net.createServer((socket) => {
       }
     }
   });
-  
+
   socket.on("close", () => {
-    log("Pi client disconnected");
-    // Only clear if this is still the active socket (handles takeover race)
-    if (piSocket === socket) {
-      piSocket = null;
-      piAuthed = false;
+    log("Agent client disconnected");
+    piClients.delete(socket);
+    if (lastAgentClient === socket) {
+      lastAgentClient = [...piClients].find((client) => client.piAuthed && !client.destroyed) || null;
+    }
+    for (const [requestId, owner] of requestOwners) {
+      if (owner !== socket) continue;
+      requestOwners.delete(requestId);
+      if (activeRequestId === requestId) {
+        activeRequestId = null;
+        writeMessage({ type: "CANCEL", requestId, reason: "client_disconnected" });
+      }
     }
   });
-  
+
   socket.on("error", (e) => log(`Socket error: ${e.message}`));
 });
 
@@ -235,5 +325,10 @@ server.listen(SOCKET_PATH, () => {
     fs.chmodSync(SOCKET_PATH, 0o600);
   } catch (err) {
     reportFsError(`Failed to chmod socket ${SOCKET_PATH}`, err);
+  }
+  try {
+    publishMetadata();
+  } catch (err) {
+    log(`Failed to publish initial metadata: ${err.message}`);
   }
 });

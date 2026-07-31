@@ -17,14 +17,22 @@ Figma-like annotation experience with floating inline note cards. DevTools-like 
 
 Click elements, add comments, submit. The agent gets selectors, box model, accessibility, screenshots — everything it needs to fix your UI.
 
+Works with **Pi** (extension), and with **Junie / Claude Code / Codex** (MCP server) — same browser extension and native host.
+
 https://github.com/user-attachments/assets/115b10ca-86e8-4b1c-b8a4-492c68759c58
 
 ## Quick Start
 
-### 1. Install Pi Extension
+### 1. Install agent integration
 
+**Pi:**
 ```bash
 pi install npm:pi-annotate
+```
+
+**Junie / Claude Code / Codex (MCP):** install the package and point your MCP config at `pi-annotate-mcp` (see [MCP setup](#use-with-junie--claude-code--codex-mcp) below). Browser steps 2–3 are the same.
+```bash
+npm install -g pi-annotate
 ```
 
 Restart pi to load the extension.
@@ -44,6 +52,90 @@ The popup shows your extension ID. Click **Copy** next to the install command, t
 ```
 
 This installs the native messaging manifest for Google Chrome, Google Chrome for Testing, and Chromium on macOS, plus the default/current config-home locations for those browsers on Linux. Fully quit and reopen that browser. The popup will show **Connected** when ready.
+
+If you use Pi Annotate in more than one browser or profile, give each one a unique **Browser profile name** in its extension popup (for example, `Work Chrome` and `Personal Chromium`). Each profile publishes an independent connection.
+
+
+## Use with Junie / Claude Code / Codex (MCP)
+
+The browser extension and native host are shared. For agents other than Pi, run the **MCP server** which exposes the same `annotate` tool over stdio.
+
+### Install package (for MCP binary)
+
+```bash
+npm install -g pi-annotate
+# or use npx without global install
+```
+
+Browser setup is unchanged: load `chrome-extension/`, run `./install.sh <extension-id>`, click the extension icon once.
+
+### MCP config
+
+**Junie** — `~/.junie/mcp/mcp.json` or project `.junie/mcp/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "pi-annotate": {
+      "command": "pi-annotate-mcp"
+    }
+  }
+}
+```
+
+**Claude Code** — project `.mcp.json` or `claude mcp add`:
+
+```bash
+claude mcp add pi-annotate -- pi-annotate-mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "pi-annotate": {
+      "command": "pi-annotate-mcp"
+    }
+  }
+}
+```
+
+**Codex** — `~/.codex/config.toml` (or project config):
+
+```toml
+[mcp_servers.pi-annotate]
+command = "pi-annotate-mcp"
+```
+
+To pin a client instance to one profile, set `PI_ANNOTATE_BROWSER` to its popup name or connection id. This is useful when several Codex/Claude/Junie instances run at once:
+
+```toml
+[mcp_servers.pi-annotate-work]
+command = "pi-annotate-mcp"
+env = { PI_ANNOTATE_BROWSER = "Work Chrome" }
+```
+
+From a local checkout without global install:
+
+```json
+{
+  "mcpServers": {
+    "pi-annotate": {
+      "command": "node",
+      "args": ["/absolute/path/to/pi-annotate/bin/pi-annotate-mcp.js"]
+    }
+  }
+}
+```
+
+### MCP tool
+
+| Tool | Args | Returns |
+|------|------|---------|
+| `list_browsers` | none | Connected browser/profile names and ids |
+| `annotate` | `browser?`, `url?`, `timeout?` (seconds, default 300) | Markdown annotations + paths to any screenshots under the temp dir |
+
+The call blocks until you submit or cancel in the browser (or the timeout fires). With one connected profile, selection is automatic. With several, pass `browser`, call `list_browsers` first, or set `PI_ANNOTATE_BROWSER`. Multiple agent clients can remain connected to the same profile; if two start annotation there simultaneously, the newer session replaces only the older request. Different profiles can annotate independently.
+
 
 ## Usage
 
@@ -137,12 +229,21 @@ Debug mode adds computed styles, parent context, and CSS variables per element. 
 ## Architecture
 
 ```
-Pi Extension (index.ts)
-    ↕ Unix Socket (/tmp/pi-annotate.sock)
-Native Host (host.cjs)
-    ↕ Browser Native Messaging
-Browser Extension (background.js → content.js)
+Pi adapter / MCP clients
+          ↕
+Browser registry (/tmp/pi-annotate-<uid>/*.json)
+          ↕ one authenticated socket per selected profile
+Native Host A ── Chrome work profile
+Native Host B ── Chromium personal profile
 ```
+
+| Piece | Role |
+|-------|------|
+| `src/core.ts` | Socket client, auth, `annotate()`, markdown `formatResult` |
+| `index.ts` | Pi extension: `/annotate` command + `annotate` tool |
+| `src/mcp-server.ts` / `pi-annotate-mcp` | MCP stdio server for Junie, Claude Code, Codex, etc. |
+| `chrome-extension/*` | Picker UI, Etch, screenshots (agent-agnostic) |
+| `native/host.cjs` | Bridge socket ↔ native messaging |
 
 | File | Purpose |
 |------|---------|
@@ -153,14 +254,14 @@ Browser Extension (background.js → content.js)
 | `chrome-extension/native/host.cjs` | Socket ↔ native messaging bridge |
 | `chrome-extension/popup.html` | Connection status + setup |
 
-Auth token generated per-run at `/tmp/pi-annotate.token`. Socket and token files use 0600 permissions.
+Each native host publishes its metadata, socket, token, and log under `/tmp/pi-annotate-<uid>/`. The directory uses 0700 permissions; endpoint files use 0600. Older hosts using `/tmp/pi-annotate.sock` and `/tmp/pi-annotate.token` remain supported as a single-browser fallback.
 
 ## Development
 
 No build step. Edit `content.js` or `background.js` directly, reload at `chrome://extensions`. Pi extension (TypeScript) loads via jiti — restart pi after changes.
 
 ```bash
-tail -f /tmp/pi-annotate-host.log                    # Native host logs
+tail -f /tmp/pi-annotate-$(id -u)/*.log              # Native host logs
 # chrome://extensions → Pi Annotate → service worker  # Background logs
 # DevTools on target page                              # Content script logs
 ```
@@ -173,7 +274,7 @@ tail -f /tmp/pi-annotate-host.log                    # Native host logs
 | "restricted URL" error | Provide a URL: `/annotate https://example.com` |
 | Native host not connecting | Click extension icon → check status, re-run install, fully restart the supported browser |
 | "Extension ID mismatch" | Copy install command from popup, re-run |
-| Socket errors | `ls -la /tmp/pi-annotate.sock` |
+| Socket/profile errors | `ls -la /tmp/pi-annotate-$(id -u)/` and call MCP `list_browsers` |
 
 **Verify native host:**
 - macOS Google Chrome: `cat ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.pi.annotate.json`

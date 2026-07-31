@@ -1,7 +1,7 @@
 {
   "name": "pi-annotate",
-  "version": "0.4.3",
-  "description": "Visual annotation tool for Pi coding agent with inline note cards",
+  "version": "0.5.0",
+  "description": "Visual annotation tool for AI coding agents (Pi, Junie, Claude Code, Codex) with inline note cards",
   "type": "module",
   "author": "Nico Bailon",
   "license": "MIT",
@@ -13,21 +13,38 @@
     "url": "https://github.com/nicobailon/pi-annotate/issues"
   },
   "homepage": "https://github.com/nicobailon/pi-annotate#readme",
+  "bin": {
+    "pi-annotate-mcp": "./bin/pi-annotate-mcp.js"
+  },
+  "scripts": {
+    "mcp": "node ./bin/pi-annotate-mcp.js",
+    "test": "node --import tsx/esm --test tests/*.test.mjs"
+  },
   "dependencies": {
-    "typebox": "^1.1.24"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "tsx": "^4.21.0",
+    "typebox": "^1.1.24",
+    "zod": "^3.25.0"
   },
   "keywords": [
     "pi-package",
     "pi",
     "pi-coding-agent",
+    "mcp",
+    "model-context-protocol",
     "annotation",
     "visual-debugging",
     "chrome-extension",
-    "extension"
+    "extension",
+    "claude-code",
+    "codex",
+    "junie"
   ],
   "files": [
     "index.ts",
     "types.ts",
+    "src/",
+    "bin/",
     "banner.png",
     "demo.mp4",
     "chrome-extension/",

@@ -4,6 +4,31 @@ All notable changes to Pi Annotate.
 
 ## [Unreleased]
 
+### Added
+- **Browser/profile selection** — Each extension profile has a persistent id and editable friendly name; MCP clients can use the `browser` argument, `list_browsers` tool, or `PI_ANNOTATE_BROWSER`
+- **Multi-client native host** — Multiple Pi/MCP client processes can stay connected to the same browser profile, with request responses routed to their initiating client
+
+### Changed
+- Native host instances publish isolated per-user socket/token metadata instead of competing for one global `/tmp/pi-annotate.sock`
+- Session replacement is scoped to the displaced request and no longer disconnects the entire client
+
+## [0.5.0] - 2026-07-29
+
+### Added
+- **MCP server** — `pi-annotate-mcp` stdio server exposes the `annotate` tool for Junie, Claude Code, Codex, and other MCP clients
+- **Shared core** — `src/core.ts` holds the native-host socket client and markdown formatting used by both Pi and MCP adapters
+
+### Changed
+- Pi `index.ts` is now a thin adapter over the shared core (command + tool behavior preserved)
+- Package description and keywords cover multi-agent / MCP usage
+- README documents MCP install config for Junie, Claude Code, and Codex
+
+### Fixed
+- **Socket lifecycle races** — `AnnotateClient` serializes connect/AUTH, ignores stale socket close handlers, uses monotonic request IDs, and rejects overlapping tool-style annotations
+- **MCP launcher** — hard-requires `tsx` (drops broken native strip-types fallback) and forwards SIGINT/SIGTERM/SIGHUP to the child process
+- **Pi tool notify** — restores “Annotation mode started in the browser” after the session opens
+- **MCP tool hints** — `readOnlyHint` set to `false` (tool opens UI / may navigate / edit-capture mutates the page)
+
 ## [0.4.3] - 2026-04-22
 
 ### Fixed

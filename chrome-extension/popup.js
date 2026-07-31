@@ -11,6 +11,7 @@ const statusText = document.getElementById('status-text');
 const setupSection = document.getElementById('setup-section');
 const readySection = document.getElementById('ready-section');
 const troubleSection = document.getElementById('trouble-section');
+const browserNameInput = document.getElementById('browser-name');
 
 // Populate fields
 extIdInput.value = extId;
@@ -44,8 +45,8 @@ if (shortcutEl) {
 const quitTipEl = document.getElementById('quit-tip');
 if (quitTipEl) {
   // Mac has ⌘Q, Windows/Linux don't have a universal quit shortcut
-  quitTipEl.textContent = isMac 
-    ? 'Fully quit the supported browser (⌘Q) and reopen' 
+  quitTipEl.textContent = isMac
+    ? 'Fully quit the supported browser (⌘Q) and reopen'
     : 'Fully quit the supported browser (menu → Exit) and reopen';
 }
 
@@ -76,6 +77,34 @@ document.getElementById('copy-id').addEventListener('click', (e) => {
 
 document.getElementById('copy-cmd').addEventListener('click', (e) => {
   copyToClipboard(installCmd, e.target);
+});
+
+chrome.runtime.sendMessage({ type: 'GET_BROWSER_IDENTITY' }).then((identity) => {
+  if (identity?.name) {
+    browserNameInput.value = identity.name;
+    browserNameInput.title = `Connection id: ${identity.id}`;
+  }
+});
+
+document.getElementById('save-browser-name')?.addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  const result = await chrome.runtime.sendMessage({
+    type: 'SET_BROWSER_NAME',
+    name: browserNameInput.value,
+  });
+  if (result?.error) {
+    setTrouble(result.error);
+    return;
+  }
+  browserNameInput.value = result.name;
+  browserNameInput.title = `Connection id: ${result.id}`;
+  const original = button.textContent;
+  button.textContent = 'Saved!';
+  button.classList.add('copied');
+  setTimeout(() => {
+    button.textContent = original;
+    button.classList.remove('copied');
+  }, 1500);
 });
 
 // Start annotation button — routes through background script which handles injection

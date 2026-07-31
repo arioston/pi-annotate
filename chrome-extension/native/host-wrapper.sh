@@ -1,2 +1,2 @@
 #!/bin/bash
-exec "/opt/homebrew/bin/node" "/Users/nicobailon/.pi/agent/extensions/pi-annotate/chrome-extension/native/host.cjs" "$@"
+exec "/home/arioston/.local/share/mise/installs/node/25/bin/node" "/home/arioston/workspace/pi-annotate/chrome-extension/native/host.cjs" "$@"

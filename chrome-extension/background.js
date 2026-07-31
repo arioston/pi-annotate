@@ -1,6 +1,6 @@
 /**
  * Pi Annotate - Background Service Worker
- * 
+ *
  * Connects to native messaging host and forwards messages between
  * the native host (Pi) and content scripts.
  */
@@ -9,6 +9,41 @@ let nativePort = null;
 let pendingPing = null;
 let lastNativeDisconnectError = "";
 const requestTabs = new Map();
+let browserIdentityPromise = null;
+
+function detectBrowserName() {
+  const brands = navigator.userAgentData?.brands || [];
+  const brand = brands.find((item) => /Edge|Chrome/i.test(item.brand))
+    || brands.find((item) => /Chromium/i.test(item.brand))
+    || brands.find((item) => !/Not.A.Brand/i.test(item.brand));
+  if (brand?.brand) return brand.brand;
+  if (/Edg\//.test(navigator.userAgent)) return "Microsoft Edge";
+  if (/Chromium\//.test(navigator.userAgent)) return "Chromium";
+  if (/Chrome\//.test(navigator.userAgent)) return "Google Chrome";
+  return "Chrome/Chromium";
+}
+
+function getBrowserIdentity() {
+  if (browserIdentityPromise) return browserIdentityPromise;
+  browserIdentityPromise = chrome.storage.local.get(["browserId", "browserName"]).then(async (stored) => {
+    const id = typeof stored.browserId === "string" && stored.browserId
+      ? stored.browserId
+      : crypto.randomUUID();
+    const name = typeof stored.browserName === "string" && stored.browserName.trim()
+      ? stored.browserName.trim()
+      : `${detectBrowserName()} ${id.slice(0, 6)}`;
+    await chrome.storage.local.set({ browserId: id, browserName: name });
+    return { id, name, browser: detectBrowserName() };
+  });
+  return browserIdentityPromise;
+}
+
+async function registerBrowser(port = nativePort) {
+  const identity = await getBrowserIdentity();
+  if (!port || nativePort !== port) return identity;
+  port.postMessage({ type: "REGISTER_BROWSER", ...identity });
+  return identity;
+}
 
 function getRequestId(msg) {
   return typeof msg.requestId === "number" ? msg.requestId : (typeof msg.id === "number" ? msg.id : null);
@@ -146,7 +181,7 @@ function connectNative() {
   console.log("[pi-annotate] Connecting to native host...");
   const port = chrome.runtime.connectNative("com.pi.annotate");
   nativePort = port;
-  
+
   port.onMessage.addListener((msg) => {
     if (msg?.type === "PONG") {
       lastNativeDisconnectError = "";
@@ -154,8 +189,13 @@ function connectNative() {
       return;
     }
 
+    if (msg?.type === "BROWSER_REGISTERED") {
+      lastNativeDisconnectError = "";
+      return;
+    }
+
     console.log("[pi-annotate] From native host:", msg);
-    
+
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]?.id) {
         console.log("[pi-annotate] No active tab found");
@@ -165,11 +205,11 @@ function connectNative() {
         }
         return;
       }
-      
+
       const requestId = getRequestId(msg);
       const tabId = requestId && requestTabs.has(requestId) ? requestTabs.get(requestId) : tabs[0].id;
       const currentUrl = tabs[0].url;
-      
+
       if (msg.type === "START_ANNOTATION") {
         const restricted = isRestrictedUrl(currentUrl);
 
@@ -210,7 +250,11 @@ function connectNative() {
       }
     });
   });
-  
+
+  registerBrowser(port).catch((err) => {
+    console.error("[pi-annotate] Failed to register browser profile:", err);
+  });
+
   port.onDisconnect.addListener(() => {
     const error = chrome.runtime.lastError?.message || "Native host disconnected unexpectedly";
     console.log("[pi-annotate] Native host disconnected", error);
@@ -226,7 +270,7 @@ function connectNative() {
 // Handle messages from content script and popup
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   console.log("[pi-annotate] Message:", msg.type);
-  
+
   if (msg.type === "CHECK_CONNECTION") {
     pingNative().then(sendResponse);
     return true;
@@ -236,9 +280,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     togglePicker();
     return;
   }
-  
+
+  if (msg.type === "GET_BROWSER_IDENTITY") {
+    getBrowserIdentity().then(sendResponse, (err) => {
+      sendResponse({ error: err instanceof Error ? err.message : String(err) });
+    });
+    return true;
+  }
+
+  if (msg.type === "SET_BROWSER_NAME") {
+    const name = typeof msg.name === "string" ? msg.name.trim().slice(0, 80) : "";
+    if (!name) {
+      sendResponse({ error: "Profile name cannot be empty" });
+      return;
+    }
+    getBrowserIdentity().then(async (identity) => {
+      await chrome.storage.local.set({ browserName: name });
+      browserIdentityPromise = Promise.resolve({ ...identity, name });
+      await registerBrowser();
+      sendResponse({ ...identity, name });
+    }).catch((err) => {
+      sendResponse({ error: err instanceof Error ? err.message : String(err) });
+    });
+    return true;
+  }
+
   const requestId = getRequestId(msg);
-  
+
   if (msg.type === "CAPTURE_SCREENSHOT") {
     if (!sender.tab?.windowId) {
       console.log("[pi-annotate] Screenshot failed: No window ID");
@@ -256,7 +324,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     return true;
   }
-  
+
   if (["ANNOTATIONS_COMPLETE", "CANCEL"].includes(msg.type)) {
     if (requestId) requestTabs.delete(requestId);
     console.log("[pi-annotate] Forwarding to native host:", msg.type);
