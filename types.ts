@@ -66,6 +66,8 @@ export interface ElementSelection {
   attributes: Record<string, string>;
   /** Per-element annotation comment */
   comment?: string;
+  /** Optional local reference images associated with this selected element. */
+  attachments?: ReferenceImageAttachment[];
   /** Box model breakdown (always captured) */
   boxModel?: BoxModel;
   /** Accessibility info (always captured) */
@@ -78,6 +80,20 @@ export interface ElementSelection {
   parentContext?: ParentContext;
   /** CSS custom properties (debug mode only) */
   cssVariables?: Record<string, string>;
+}
+
+/** Image attached to a note for visual comparison (reference or expected state). */
+export interface ReferenceImageAttachment {
+  id: string;
+  name: string;
+  mimeType: "image/webp" | "image/png" | "image/jpeg";
+  width: number;
+  height: number;
+  size: number;
+  /** Present in browser transport; omitted after local report persistence. */
+  dataUrl?: string;
+  /** Relative path in a persisted issue report. */
+  path?: string;
 }
 
 /** Screenshot cropped to a specific element */
@@ -138,6 +154,30 @@ export interface EditCapture {
   warnings?: string[];
 }
 
+/** Sanitized request metadata captured while annotation mode is active. */
+export interface NetworkRequestContext {
+  /** URL with credentials removed and sensitive query values redacted. */
+  url: string;
+  method: string;
+  /** Chrome webRequest resource type (xmlhttprequest, script, image, etc.). */
+  type: string;
+  /** Milliseconds after network capture began. */
+  startedAtMs: number;
+  durationMs?: number;
+  statusCode?: number;
+  fromCache?: boolean;
+  error?: string;
+}
+
+/** Bounded, tab-scoped network context. Never contains headers, cookies, or bodies. */
+export interface NetworkContext {
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  truncated: boolean;
+  requests: NetworkRequestContext[];
+}
+
 /** Result returned from annotation session */
 export interface AnnotationResult {
   /** Whether the annotation completed successfully */
@@ -161,4 +201,6 @@ export interface AnnotationResult {
   /** Error or cancellation reason */
   reason?: string;
   editCapture?: EditCapture;
+  /** Optional sanitized network context requested for a local issue report. */
+  network?: NetworkContext;
 }

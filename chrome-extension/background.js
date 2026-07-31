@@ -9,7 +9,100 @@ let nativePort = null;
 let pendingPing = null;
 let lastNativeDisconnectError = "";
 const requestTabs = new Map();
+const networkSessions = new Map();
+const MAX_NETWORK_REQUESTS = 200;
 let browserIdentityPromise = null;
+
+function sanitizeNetworkUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.username = "";
+    parsed.password = "";
+    parsed.hash = "";
+    for (const key of parsed.searchParams.keys()) {
+      if (/(token|key|secret|auth|password|passwd|session|signature|code|credential|jwt|sso|ticket)/i.test(key)) {
+        parsed.searchParams.set(key, "[redacted]");
+      }
+    }
+    return parsed.toString().slice(0, 2048);
+  } catch {
+    return String(rawUrl || "").slice(0, 2048);
+  }
+}
+
+function startNetworkCapture(requestId, tabId) {
+  if (!requestId || !Number.isInteger(tabId)) return;
+  // A tab only has one active annotation UI. Drop capture state belonging to
+  // a request replaced by a newer client session on that same tab.
+  for (const [existingId, session] of networkSessions) {
+    if (session.tabId === tabId && existingId !== requestId) networkSessions.delete(existingId);
+  }
+  if (networkSessions.has(requestId)) return;
+  networkSessions.set(requestId, {
+    tabId,
+    startedAt: Date.now(),
+    requests: new Map(),
+    truncated: false,
+  });
+}
+
+function beginNetworkRequest(details) {
+  for (const session of networkSessions.values()) {
+    if (session.tabId !== details.tabId) continue;
+    if (!session.requests.has(details.requestId) && session.requests.size >= MAX_NETWORK_REQUESTS) {
+      session.truncated = true;
+      continue;
+    }
+    session.requests.set(details.requestId, {
+      url: sanitizeNetworkUrl(details.url),
+      method: details.method || "GET",
+      type: details.type || "other",
+      startedAtMs: Math.max(0, Math.round(details.timeStamp - session.startedAt)),
+      startedAtEpoch: details.timeStamp,
+    });
+  }
+}
+
+function finishNetworkRequest(details, error) {
+  for (const session of networkSessions.values()) {
+    if (session.tabId !== details.tabId) continue;
+    const entry = session.requests.get(details.requestId);
+    if (!entry) continue;
+    entry.durationMs = Math.max(0, Math.round(details.timeStamp - entry.startedAtEpoch));
+    if (typeof details.statusCode === "number") entry.statusCode = details.statusCode;
+    if (typeof details.fromCache === "boolean") entry.fromCache = details.fromCache;
+    if (error) entry.error = String(error).slice(0, 300);
+  }
+}
+
+function finishNetworkCapture(requestId) {
+  const session = networkSessions.get(requestId);
+  if (!session) return null;
+  networkSessions.delete(requestId);
+  const endedAt = Date.now();
+  const requests = [...session.requests.values()]
+    .map(({ startedAtEpoch: _privateTimestamp, ...request }) => request)
+    .sort((a, b) => a.startedAtMs - b.startedAtMs);
+  return {
+    startedAt: new Date(session.startedAt).toISOString(),
+    endedAt: new Date(endedAt).toISOString(),
+    durationMs: endedAt - session.startedAt,
+    truncated: session.truncated,
+    requests,
+  };
+}
+
+if (chrome.webRequest) {
+  chrome.webRequest.onBeforeRequest.addListener(beginNetworkRequest, { urls: ["<all_urls>"] });
+  chrome.webRequest.onCompleted.addListener(
+    (details) => finishNetworkRequest(details),
+    { urls: ["<all_urls>"] },
+  );
+  chrome.webRequest.onErrorOccurred.addListener(
+    (details) => finishNetworkRequest(details, details.error || "request_failed"),
+    { urls: ["<all_urls>"] },
+  );
+}
 
 function detectBrowserName() {
   const brands = navigator.userAgentData?.brands || [];
@@ -106,6 +199,8 @@ function sendToNative(msg) {
     return;
   }
   try {
+    const requestId = getRequestId(msg);
+    if (msg?.type === "CANCEL" && requestId) finishNetworkCapture(requestId);
     nativePort.postMessage(msg);
   } catch (err) {
     console.error("[pi-annotate] Failed to send to native host:", err);
@@ -222,10 +317,12 @@ function connectNative() {
                 sendToNative({ type: "CANCEL", requestId, reason: chrome.runtime.lastError.message });
                 return;
               }
+              if (msg.captureNetwork) startNetworkCapture(requestId, tab.id);
               injectAfterLoad(tab.id, msg, requestId);
             });
           } else {
             console.log("[pi-annotate] Navigating to:", msg.url);
+            if (msg.captureNetwork) startNetworkCapture(requestId, tabId);
             chrome.tabs.update(tabId, { url: msg.url }, (tab) => {
               if (chrome.runtime.lastError) {
                 console.error("[pi-annotate] Failed to navigate:", chrome.runtime.lastError.message);
@@ -243,9 +340,11 @@ function connectNative() {
         } else {
           console.log("[pi-annotate] Activating on current tab:", currentUrl);
           if (requestId) requestTabs.set(requestId, tabId);
+          if (msg.captureNetwork) startNetworkCapture(requestId, tabId);
           sendToContentScript(tabId, msg);
         }
       } else {
+        if (msg.type === "CANCEL" && requestId) finishNetworkCapture(requestId);
         sendToContentScript(tabId, msg);
       }
     });
@@ -327,8 +426,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (["ANNOTATIONS_COMPLETE", "CANCEL"].includes(msg.type)) {
     if (requestId) requestTabs.delete(requestId);
+    if (msg.type === "ANNOTATIONS_COMPLETE" && requestId && msg.result) {
+      const network = finishNetworkCapture(requestId);
+      if (network) msg.result.network = network;
+    }
     console.log("[pi-annotate] Forwarding to native host:", msg.type);
     sendToNative(msg);
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  for (const [requestId, session] of networkSessions) {
+    if (session.tabId === tabId) networkSessions.delete(requestId);
   }
 });
 

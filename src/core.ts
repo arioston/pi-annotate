@@ -22,6 +22,8 @@ export const NOT_CONNECTED_MESSAGE =
 
 export type AnnotateParams = {
   url?: string;
+  /** Capture bounded, sanitized network metadata for this tab while annotating. */
+  captureNetwork?: boolean;
   /** Max seconds to wait for annotations. Default: 300 */
   timeout?: number;
   signal?: AbortSignal;
@@ -35,7 +37,7 @@ export type AnnotateClientOptions = {
    * Called when an annotation completes that was not started via annotate()
    * (e.g. Pi /annotate command fire-and-forget flow).
    */
-  onUnmanagedComplete?: (result: AnnotationResult) => void | Promise<void>;
+  onUnmanagedComplete?: (result: AnnotationResult, requestId?: number) => void | Promise<void>;
   /** Override native-host socket path (tests / custom installs). Default: SOCKET_PATH */
   socketPath?: string;
   /** Override auth token path. Default: TOKEN_PATH */
@@ -219,7 +221,7 @@ export class AnnotateClient {
   private readonly browserSelector?: string;
   private readonly registryDir: string;
   private onStatus?: (message: string) => void;
-  private onUnmanagedComplete?: (result: AnnotationResult) => void | Promise<void>;
+  private onUnmanagedComplete?: (result: AnnotationResult, requestId?: number) => void | Promise<void>;
 
   constructor(options: AnnotateClientOptions = {}) {
     this.onStatus = options.onStatus;
@@ -236,7 +238,7 @@ export class AnnotateClient {
     this.onStatus = handler;
   }
 
-  setUnmanagedCompleteHandler(handler?: (result: AnnotationResult) => void | Promise<void>) {
+  setUnmanagedCompleteHandler(handler?: (result: AnnotationResult, requestId?: number) => void | Promise<void>) {
     this.onUnmanagedComplete = handler;
   }
 
@@ -428,10 +430,14 @@ export class AnnotateClient {
       this.setStatus("Session replaced by another client");
       const reason = typeof msg.reason === "string" ? msg.reason : "Session replaced by another terminal";
 
-      if (requestId !== null && this.pendingRequests.has(requestId)) {
-        const resolvePending = this.pendingRequests.get(requestId);
-        this.pendingRequests.delete(requestId);
-        if (resolvePending) await resolvePending(cancelledResult(reason));
+      if (requestId !== null) {
+        if (this.pendingRequests.has(requestId)) {
+          const resolvePending = this.pendingRequests.get(requestId);
+          this.pendingRequests.delete(requestId);
+          if (resolvePending) await resolvePending(cancelledResult(reason));
+        } else if (this.onUnmanagedComplete) {
+          await this.onUnmanagedComplete(cancelledResult(reason), requestId);
+        }
       } else {
         for (const [, resolvePending] of this.pendingRequests) {
           await resolvePending(cancelledResult(reason));
@@ -449,7 +455,7 @@ export class AnnotateClient {
         this.pendingRequests.delete(requestId);
         await resolvePending(msg.result);
       } else if (this.onUnmanagedComplete) {
-        await this.onUnmanagedComplete(msg.result);
+        await this.onUnmanagedComplete(msg.result, requestId ?? undefined);
       }
       return;
     }
@@ -462,8 +468,12 @@ export class AnnotateClient {
         await resolvePending(
           cancelledResult(typeof msg.reason === "string" ? msg.reason : "user"),
         );
+      } else if (requestId !== null && this.onUnmanagedComplete) {
+        await this.onUnmanagedComplete(
+          cancelledResult(typeof msg.reason === "string" ? msg.reason : "user"),
+          requestId,
+        );
       }
-      // For command flow, cancel is just ignored (UI already closed)
     }
   }
 
@@ -471,13 +481,14 @@ export class AnnotateClient {
    * Fire-and-forget start for command-style UX. Completion is delivered via
    * onUnmanagedComplete (not through a returned promise).
    */
-  async startAnnotation(url?: string): Promise<number> {
+  async startAnnotation(url?: string, options: { captureNetwork?: boolean } = {}): Promise<number> {
     await this.connect();
     const requestId = this.allocateRequestId();
     this.sendToHost({
       type: "START_ANNOTATION",
       requestId,
       url,
+      captureNetwork: options.captureNetwork ?? false,
     });
     return requestId;
   }
@@ -487,7 +498,7 @@ export class AnnotateClient {
    * Only one tool-style annotation may be in flight per client (native host is single-session).
    */
   async annotate(params: AnnotateParams = {}): Promise<AnnotationResult> {
-    const { url, timeout = 300, signal, onStarted } = params;
+    const { url, captureNetwork = false, timeout = 300, signal, onStarted } = params;
 
     if (this.annotateInFlight || this.pendingRequests.size > 0) {
       return cancelledResult("An annotation session is already in progress");
@@ -536,6 +547,7 @@ export class AnnotateClient {
           type: "START_ANNOTATION",
           requestId,
           url,
+          captureNetwork,
         });
         onStarted?.();
       });
@@ -763,6 +775,32 @@ export async function formatResult(result: AnnotationResult): Promise<string> {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         output += `- Element ${shot?.index ?? i + 1}: *capture failed (${message})*\n`;
+      }
+    }
+    output += "\n";
+  }
+
+  if (result.elements?.some((element) => element.attachments?.length)) {
+    output += "### Reference images\n\n";
+    for (let elementIndex = 0; elementIndex < result.elements.length; elementIndex++) {
+      const attachments = result.elements[elementIndex].attachments || [];
+      for (let attachmentIndex = 0; attachmentIndex < attachments.length; attachmentIndex++) {
+        const attachment = attachments[attachmentIndex];
+        try {
+          if (!attachment.dataUrl?.startsWith("data:image/")) throw new Error("Invalid attachment data");
+          const extension = attachment.mimeType === "image/jpeg" ? "jpg" : attachment.mimeType.split("/")[1];
+          const attachmentPath = path.join(
+            os.tmpdir(),
+            `pi-annotate-${timestamp}-el${elementIndex + 1}-ref${attachmentIndex + 1}.${extension}`,
+          );
+          const buffer = Buffer.from(attachment.dataUrl.replace(/^data:image\/\w+;base64,/, ""), "base64");
+          if (buffer.length > MAX_SCREENSHOT_BYTES) throw new Error("Attachment too large");
+          await fs.promises.writeFile(attachmentPath, buffer);
+          output += `- Element ${elementIndex + 1} — ${attachment.name}: ${attachmentPath}\n`;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          output += `- Element ${elementIndex + 1} — ${attachment.name}: *capture failed (${message})*\n`;
+        }
       }
     }
     output += "\n";

@@ -5,6 +5,10 @@ All notable changes to Pi Annotate.
 ## [Unreleased]
 
 ### Added
+- **Per-element reference images** — Note cards accept local PNG/JPEG/WebP references with thumbnails, removal controls, metadata stripping, and bounded client-side normalization; saved reports render current UI and reference images together
+- **Local issue reports** — `/issue` and `create_issue_report` persist annotations, comments, screenshots, structured JSON, and Markdown under a stable `PIA-…` reference without uploading or creating an external ticket
+- **Network context** — Issue annotation sessions capture up to 200 tab-scoped request URLs, methods, types, status/errors, cache state, and timings; sensitive query values are redacted and headers/cookies/bodies are excluded
+- **Report lookup tools** — Pi and MCP expose `list_issue_reports` and `get_issue_report` for referencing saved reports later
 - **Browser/profile selection** — Each extension profile has a persistent id and editable friendly name; MCP clients can use the `browser` argument, `list_browsers` tool, or `PI_ANNOTATE_BROWSER`
 - **Multi-client native host** — Multiple Pi/MCP client processes can stay connected to the same browser profile, with request responses routed to their initiating client
 

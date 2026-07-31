@@ -17,6 +17,11 @@ import {
   listBrowserTargets,
   NOT_CONNECTED_MESSAGE,
 } from "./core.js";
+import {
+  listIssueReports,
+  readIssueReport,
+  saveIssueReport,
+} from "./issue-reports.js";
 
 const SERVER_NAME = "pi-annotate";
 const SERVER_VERSION = "0.5.0";
@@ -131,6 +136,131 @@ async function main() {
               text: `${NOT_CONNECTED_MESSAGE} (${message})`,
             },
           ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "create_issue_report",
+    {
+      title: "Create local issue report",
+      description:
+        "Open annotation mode, capture selected areas, comments, screenshots, and optional sanitized network request metadata, then persist a local issue report. " +
+        "The report is not uploaded and no external ticket is created.",
+      inputSchema: {
+        browser: annotateInputShape.browser,
+        url: annotateInputShape.url,
+        timeout: annotateInputShape.timeout,
+        title: z.string().optional().describe("Issue title. If omitted, derives one from the annotation context or comments."),
+        captureNetwork: z.boolean().optional().default(true).describe("Capture tab-scoped request metadata while annotating. Headers, cookies, and bodies are never captured."),
+      },
+      outputSchema: {
+        ref: z.string(),
+        title: z.string(),
+        directory: z.string(),
+        markdownPath: z.string(),
+        jsonPath: z.string(),
+        requestCount: z.number(),
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async ({ browser, url, timeout, title, captureNetwork }, extra) => {
+      const timeoutSeconds = timeout ?? 300;
+      try {
+        const client = getClient(browser);
+        const result = await client.annotate({
+          url,
+          timeout: timeoutSeconds,
+          captureNetwork: captureNetwork ?? true,
+          signal: extra.signal,
+        });
+        if (!result.success) {
+          return {
+            content: [{ type: "text" as const, text: await formatToolResult(result, { timeoutSeconds }) }],
+            isError: true,
+          };
+        }
+        const target = client.getBrowserTarget();
+        const summary = await saveIssueReport(result, {
+          title,
+          browser: target
+            ? { id: target.id, name: target.name, browser: target.browser }
+            : null,
+        });
+        const structuredContent = {
+          ref: summary.ref,
+          title: summary.title,
+          directory: summary.directory,
+          markdownPath: `${summary.directory}/report.md`,
+          jsonPath: `${summary.directory}/report.json`,
+          requestCount: summary.requestCount,
+        };
+        return {
+          content: [{
+            type: "text" as const,
+            text:
+              `Saved local issue report ${summary.ref}: ${summary.title}\n` +
+              `Markdown: ${structuredContent.markdownPath}\n` +
+              `JSON: ${structuredContent.jsonPath}\n` +
+              `Network requests captured: ${summary.requestCount}`,
+          }],
+          structuredContent,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[pi-annotate] issue report error: ${message}`);
+        return {
+          content: [{ type: "text" as const, text: `Could not create local issue report: ${message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_issue_reports",
+    {
+      title: "List local issue reports",
+      description: "List recently persisted Pi Annotate issue reports and their local references.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(100).optional().describe("Maximum reports to return. Default: 20."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ limit }) => {
+      const reports = await listIssueReports({ limit });
+      const text = reports.length
+        ? reports.map((report) =>
+            `${report.ref} — ${report.title}${report.url ? ` — ${report.url}` : ""}\n  ${report.directory}/report.md`,
+          ).join("\n")
+        : "No local Pi Annotate issue reports found.";
+      return { content: [{ type: "text" as const, text }] };
+    },
+  );
+
+  server.registerTool(
+    "get_issue_report",
+    {
+      title: "Get local issue report",
+      description: "Read a persisted Pi Annotate issue report by its stable PIA reference.",
+      inputSchema: { ref: z.string().describe("Issue report reference, for example PIA-20260731-120000-A1B2C3D4.") },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ ref }) => {
+      try {
+        const stored = await readIssueReport(ref);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `${stored.markdown}\n\nLocal report directory: ${stored.directory}`,
+          }],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text" as const, text: `Issue report ${ref} could not be read: ${message}` }],
           isError: true,
         };
       }

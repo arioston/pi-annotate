@@ -89,13 +89,14 @@ test("one browser host routes concurrent agent clients by request owner", async 
     () => extensionMessages.find((message) => message.type === "START_ANNOTATION"),
     "first client did not start annotation",
   );
-  const secondResultPromise = second.annotate({ timeout: 3 });
+  const secondResultPromise = second.annotate({ timeout: 3, captureNetwork: true });
   const secondStart = await waitFor(
     () => extensionMessages.find(
       (message) => message.type === "START_ANNOTATION" && message.requestId !== firstStart.requestId,
     ),
     "second client did not start annotation",
   );
+  assert.equal(secondStart.captureNetwork, true);
 
   const firstResult = await firstResultPromise;
   assert.equal(firstResult.cancelled, true);
@@ -109,9 +110,17 @@ test("one browser host routes concurrent agent clients by request owner", async 
       elements: [],
       url: "https://example.test",
       viewport: { width: 1280, height: 720 },
+      network: {
+        startedAt: "2026-07-31T12:00:00.000Z",
+        endedAt: "2026-07-31T12:00:01.000Z",
+        durationMs: 1000,
+        truncated: false,
+        requests: [],
+      },
     },
   }));
   const secondResult = await secondResultPromise;
   assert.equal(secondResult.success, true);
   assert.equal(secondResult.url, "https://example.test");
+  assert.equal(secondResult.network.durationMs, 1000);
 });

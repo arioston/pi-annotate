@@ -133,6 +133,9 @@ From a local checkout without global install:
 |------|------|---------|
 | `list_browsers` | none | Connected browser/profile names and ids |
 | `annotate` | `browser?`, `url?`, `timeout?` (seconds, default 300) | Markdown annotations + paths to any screenshots under the temp dir |
+| `create_issue_report` | `browser?`, `url?`, `title?`, `timeout?`, `captureNetwork?` | A stable local `PIA-…` reference and report paths |
+| `list_issue_reports` | `limit?` | Recently saved local reports |
+| `get_issue_report` | `ref` | Markdown and structured data for a saved report |
 
 The call blocks until you submit or cancel in the browser (or the timeout fires). With one connected profile, selection is automatic. With several, pass `browser`, call `list_browsers` first, or set `PI_ANNOTATE_BROWSER`. Multiple agent clients can remain connected to the same profile; if two start annotation there simultaneously, the newer session replaces only the older request. Different profiles can annotate independently.
 
@@ -142,6 +145,8 @@ The call blocks until you submit or cancel in the browser (or the timeout fires)
 ```bash
 /annotate                  # Current browser tab
 /annotate https://x.com    # Opens URL first
+/issue                     # Annotate and save a local issue report
+/issue https://x.com       # Open a URL, annotate it, and save the report
 ```
 
 | Action | How |
@@ -168,6 +173,27 @@ The call blocks until you submit or cancel in the browser (or the timeout fires)
 **Screenshots** — Individual crops per element (20px padding) or full-page mode with numbered badges drawn on the screenshot to identify elements. Toggle per element with the 📷 button.
 
 **Edit Capture** — Toggle "Etch" in the toolbar to record DevTools edits. Change inline styles, modify CSS rules, add/remove classes, edit text — everything is tracked via MutationObserver. A pulsing red dot and badge counter show recording status. At submit, the extension takes before/after screenshots by briefly undoing visual changes, and produces structured property-level diffs the agent can map to source code. Works alongside element selection or standalone.
+
+**Local Issue Reports** — Use `/issue` in Pi or the MCP `create_issue_report` tool to persist the annotated areas, comments, screenshots, page context, and sanitized network metadata. Reports receive stable references such as `PIA-20260731-120000-A1B2C3D4`; nothing is uploaded and no external ticket is created.
+
+Each note card also has a **📎 Reference** action. Attach PNG, JPEG, or WebP design references directly to the selected element; thumbnails stay with the note, and saved reports render the captured UI beside the reference image. Images are normalized locally, stripped of metadata, resized to 2048px maximum, and limited to 3 per element / 8 per report.
+
+### Local issue report storage
+
+Reports are stored under:
+
+```text
+~/.local/share/pi-annotate/issues/<PIA-reference>/
+├── report.md
+├── report.json
+└── assets/
+    ├── element-1.png
+    └── full-page.png
+```
+
+Set `PI_ANNOTATE_DATA_DIR` on the Pi or MCP process to choose another local data directory. Each report folder contains portable relative links, so it can be attached to or referenced from Jira, GitHub, Linear, or another ticket system later.
+
+Network capture is active only for the annotated tab and only for the lifetime of an issue annotation session. It records at most 200 request URLs, methods, resource types, status/error state, cache state, and timings. Sensitive query parameters are redacted. Request/response headers, authorization data, cookies, and bodies are never collected.
 
 **Restricted Tabs** — If the current tab is `chrome://` or other restricted URLs, providing a URL opens a new tab automatically. Popup button and keyboard shortcut auto-inject the content script on fresh tabs.
 
@@ -240,6 +266,7 @@ Native Host B ── Chromium personal profile
 | Piece | Role |
 |-------|------|
 | `src/core.ts` | Socket client, auth, `annotate()`, markdown `formatResult` |
+| `src/issue-reports.ts` | Private local report persistence, assets, listing, and lookup |
 | `index.ts` | Pi extension: `/annotate` command + `annotate` tool |
 | `src/mcp-server.ts` / `pi-annotate-mcp` | MCP stdio server for Junie, Claude Code, Codex, etc. |
 | `chrome-extension/*` | Picker UI, Etch, screenshots (agent-agnostic) |

@@ -133,6 +133,10 @@ function redactForLog(msg) {
     if (key === "screenshot" || key === "beforeScreenshot" || key === "afterScreenshot") return "[redacted]";
     if (key === "screenshots") return Array.isArray(value) ? `[${value.length} screenshots]` : "[redacted]";
     if (key === "dataUrl") return "[redacted]";
+    if (key === "network") {
+      const count = Array.isArray(value?.requests) ? value.requests.length : 0;
+      return `[${count} sanitized network requests]`;
+    }
     return value;
   });
 }

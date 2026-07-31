@@ -21,6 +21,11 @@
   
   const SCREENSHOT_PADDING = 20;
   const TEXT_MAX_LENGTH = 500;
+  const MAX_REFERENCE_IMAGES_PER_ELEMENT = 3;
+  const MAX_REFERENCE_IMAGES_TOTAL = 8;
+  const MAX_REFERENCE_IMAGE_BYTES = 2 * 1024 * 1024;
+  const MAX_REFERENCE_PAYLOAD_BYTES = 12 * 1024 * 1024;
+  const MAX_REFERENCE_IMAGE_DIMENSION = 2048;
   const Z_INDEX_CONNECTORS = 2147483643;
   const Z_INDEX_MARKERS = 2147483644;
   const Z_INDEX_HIGHLIGHT = 2147483645;
@@ -38,6 +43,93 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  function attachmentBytes(dataUrl) {
+    const comma = dataUrl.indexOf(",");
+    if (comma < 0) return 0;
+    return Math.floor((dataUrl.length - comma - 1) * 3 / 4);
+  }
+
+  function totalAttachmentBytes() {
+    let total = 0;
+    elementAttachments.forEach((attachments) => {
+      attachments.forEach((attachment) => { total += attachment.size || attachmentBytes(attachment.dataUrl || ""); });
+    });
+    return total;
+  }
+
+  function totalAttachmentCount() {
+    let total = 0;
+    elementAttachments.forEach((attachments) => { total += attachments.length; });
+    return total;
+  }
+
+  function formatAttachmentSize(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function readReferenceImage(file) {
+    return new Promise((resolve, reject) => {
+      if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
+        reject(new Error("Use a PNG, JPEG, or WebP image."));
+        return;
+      }
+      if (file.size > 12 * 1024 * 1024) {
+        reject(new Error("The source image must be smaller than 12MB."));
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Could not read the image."));
+      reader.onload = () => {
+        const image = new Image();
+        image.onerror = () => reject(new Error("The selected file is not a readable image."));
+        image.onload = () => {
+          const scale = Math.min(1, MAX_REFERENCE_IMAGE_DIMENSION / Math.max(image.naturalWidth, image.naturalHeight));
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+          const context = canvas.getContext("2d");
+          if (!context) {
+            reject(new Error("Could not prepare the image."));
+            return;
+          }
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+          let quality = 0.9;
+          let dataUrl = canvas.toDataURL("image/webp", quality);
+          while (attachmentBytes(dataUrl) > MAX_REFERENCE_IMAGE_BYTES && quality > 0.5) {
+            quality -= 0.1;
+            dataUrl = canvas.toDataURL("image/webp", quality);
+          }
+          while (attachmentBytes(dataUrl) > MAX_REFERENCE_IMAGE_BYTES && canvas.width > 640) {
+            canvas.width = Math.round(canvas.width * 0.8);
+            canvas.height = Math.round(canvas.height * 0.8);
+            context.drawImage(image, 0, 0, canvas.width, canvas.height);
+            dataUrl = canvas.toDataURL("image/webp", 0.8);
+          }
+          const size = attachmentBytes(dataUrl);
+          if (size > MAX_REFERENCE_IMAGE_BYTES) {
+            reject(new Error("The processed image must be smaller than 2MB."));
+            return;
+          }
+          resolve({
+            id: crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            name: String(file.name || "reference-image").slice(0, 120),
+            mimeType: "image/webp",
+            width: canvas.width,
+            height: canvas.height,
+            size,
+            dataUrl,
+          });
+        };
+        image.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
   }
   
   // Check if element is part of pi-annotate UI (by id or class)
@@ -84,6 +176,7 @@
   let notesContainer = null;
   let connectorsEl = null;
   let elementComments = new Map(); // index → comment string
+  let elementAttachments = new Map(); // index → reference image attachments
   let openNotes = new Set();       // indices of currently open notes
   let notePositions = new Map();   // index → {x, y} manual position overrides
   let dragState = null;            // { card, startX, startY, startLeft, startTop }
@@ -433,6 +526,7 @@
     }
     
     .pi-note-screenshot,
+    .pi-note-attach,
     .pi-note-close,
     .pi-note-expand,
     .pi-note-contract {
@@ -443,7 +537,18 @@
       cursor: pointer;
       padding: 2px 4px;
       border-radius: var(--pi-radius);
-      transition: all 0.15s;
+      transition: background-color 150ms ease-out, color 150ms ease-out, opacity 150ms ease-out, transform 120ms ease-out;
+    }
+
+    .pi-note-attach {
+      color: var(--pi-accent);
+      font-size: 12px;
+    }
+
+    .pi-note-attach:active,
+    .pi-note-close:active,
+    .pi-note-screenshot:active {
+      transform: scale(0.96);
     }
     
     .pi-note-expand,
@@ -481,6 +586,64 @@
     
     .pi-note-textarea::placeholder {
       color: var(--pi-fg-dim);
+    }
+
+    .pi-note-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .pi-note-attachment {
+      position: relative;
+      width: 58px;
+      height: 46px;
+      overflow: hidden;
+      border: 1px solid var(--pi-border-muted);
+      border-radius: 5px;
+      background: var(--pi-bg-body);
+    }
+
+    .pi-note-attachment img {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+    }
+
+    .pi-note-attachment-remove {
+      position: absolute;
+      top: 1px;
+      right: 1px;
+      width: 16px;
+      height: 16px;
+      border: 0;
+      border-radius: 50%;
+      background: rgba(24, 24, 27, 0.82);
+      color: #fff;
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 14px;
+      padding: 0;
+    }
+
+    .pi-note-attachment-error {
+      width: 100%;
+      color: var(--pi-error);
+      font-size: 10px;
+      line-height: 1.3;
+    }
+
+    @media (hover: hover) and (pointer: fine) {
+      .pi-note-attach:hover { background: var(--pi-accent-muted); }
+      .pi-note-attachment-remove:hover { background: var(--pi-error); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .pi-note-attach,
+      .pi-note-close,
+      .pi-note-screenshot { transition: none; }
     }
     
     /* ═══════════════════════════════════════════════════════════════════
@@ -824,6 +987,7 @@
     selectedElements = [];
     elementScreenshots = new Map();
     elementComments = new Map();
+    elementAttachments = new Map();
     openNotes = new Set();
     notePositions = new Map();
     dragState = null;
@@ -928,6 +1092,7 @@
     selectedElements = [];
     elementScreenshots = new Map();
     elementComments = new Map();
+    elementAttachments = new Map();
     openNotes = new Set();
     notePositions = new Map();
     dragState = null;
@@ -1230,6 +1395,81 @@
     
     return adjusted;
   }
+
+  function renderAttachmentPreviews(card, index, errorMessage = "") {
+    const container = card.querySelector(".pi-note-attachments");
+    if (!container) return;
+    container.innerHTML = "";
+    const attachments = elementAttachments.get(index) || [];
+    for (const attachment of attachments) {
+      const preview = document.createElement("div");
+      preview.className = "pi-note-attachment";
+      preview.title = `${attachment.name} (${formatAttachmentSize(attachment.size)})`;
+
+      const image = document.createElement("img");
+      image.src = attachment.dataUrl;
+      image.alt = attachment.name;
+      preview.appendChild(image);
+
+      const remove = document.createElement("button");
+      remove.className = "pi-note-attachment-remove";
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.title = `Remove ${attachment.name}`;
+      remove.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const currentIndex = parseInt(card.dataset.index, 10);
+        const next = (elementAttachments.get(currentIndex) || [])
+          .filter((item) => item.id !== attachment.id);
+        if (next.length) elementAttachments.set(currentIndex, next);
+        else elementAttachments.delete(currentIndex);
+        renderAttachmentPreviews(card, currentIndex);
+      });
+      preview.appendChild(remove);
+      container.appendChild(preview);
+    }
+
+    if (errorMessage) {
+      const error = document.createElement("div");
+      error.className = "pi-note-attachment-error";
+      error.textContent = errorMessage;
+      container.appendChild(error);
+    }
+  }
+
+  async function addReferenceImages(card, index, files) {
+    const existing = [...(elementAttachments.get(index) || [])];
+    if (existing.length >= MAX_REFERENCE_IMAGES_PER_ELEMENT) {
+      renderAttachmentPreviews(card, index, `Maximum ${MAX_REFERENCE_IMAGES_PER_ELEMENT} reference images per element.`);
+      return;
+    }
+
+    const selectedFiles = [...files].slice(0, MAX_REFERENCE_IMAGES_PER_ELEMENT - existing.length);
+    const next = existing;
+    if (next.length) elementAttachments.set(index, next);
+    let errorMessage = "";
+    for (const file of selectedFiles) {
+      if (totalAttachmentCount() >= MAX_REFERENCE_IMAGES_TOTAL) {
+        errorMessage = `Maximum ${MAX_REFERENCE_IMAGES_TOTAL} reference images per report.`;
+        break;
+      }
+      try {
+        const attachment = await readReferenceImage(file);
+        if (totalAttachmentBytes() + attachment.size > MAX_REFERENCE_PAYLOAD_BYTES) {
+          errorMessage = "Reference images exceed the 12MB report limit.";
+          break;
+        }
+        next.push(attachment);
+      } catch (error) {
+        errorMessage = error instanceof Error ? error.message : String(error);
+        break;
+      }
+    }
+    if (next.length) elementAttachments.set(index, next);
+    else elementAttachments.delete(index);
+    renderAttachmentPreviews(card, index, errorMessage);
+  }
   
   function createNoteCard(index) {
     const sel = selectedElements[index];
@@ -1277,6 +1517,9 @@
       </div>
       <div class="pi-note-body">
         <textarea class="pi-note-textarea" placeholder="Describe changes for this element...">${escapeHtml(comment)}</textarea>
+        <button class="pi-note-attach" type="button" title="Attach a local reference image">📎 Reference</button>
+        <input class="pi-note-attachment-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
+        <div class="pi-note-attachments"></div>
       </div>
     `;
     
@@ -1289,6 +1532,20 @@
       elementComments.set(getIndex(), textarea.value);
       autoResizeTextarea(textarea);
     });
+
+    const attachButton = card.querySelector(".pi-note-attach");
+    const attachmentInput = card.querySelector(".pi-note-attachment-input");
+    attachButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      attachmentInput.click();
+    });
+    attachmentInput.addEventListener("change", async () => {
+      const currentIndex = getIndex();
+      await addReferenceImages(card, currentIndex, attachmentInput.files || []);
+      attachmentInput.value = "";
+    });
+    renderAttachmentPreviews(card, index);
     
     const screenshotBtn = card.querySelector(".pi-note-screenshot");
     screenshotBtn.addEventListener("click", () => {
@@ -1432,6 +1689,7 @@
     
     elementScreenshots = reindexMap(elementScreenshots);
     elementComments = reindexMap(elementComments);
+    elementAttachments = reindexMap(elementAttachments);
     notePositions = reindexMap(notePositions);
     openNotes = reindexSet(openNotes);
     
@@ -2377,6 +2635,7 @@
     const nextSelections = [];
     const nextScreenshots = new Map();
     const nextComments = new Map();
+    const nextAttachments = new Map();
     const nextPositions = new Map();
     const nextOpenNotes = new Set();
     
@@ -2390,6 +2649,9 @@
         }
         if (elementComments.has(i)) {
           nextComments.set(nextIndex, elementComments.get(i));
+        }
+        if (elementAttachments.has(i)) {
+          nextAttachments.set(nextIndex, elementAttachments.get(i));
         }
         if (notePositions.has(i)) {
           nextPositions.set(nextIndex, notePositions.get(i));
@@ -2407,6 +2669,7 @@
       selectedElements = nextSelections;
       elementScreenshots = nextScreenshots;
       elementComments = nextComments;
+      elementAttachments = nextAttachments;
       notePositions = nextPositions;
       
       notesContainer.innerHTML = "";
@@ -3167,9 +3430,11 @@
 
     const elements = selectedElements.map((sel, i) => {
       const { element, ...rest } = sel;
+      const attachments = elementAttachments.get(i) || [];
       return {
         ...rest,
-        comment: elementComments.get(i) || ""
+        comment: elementComments.get(i) || "",
+        ...(attachments.length ? { attachments } : {}),
       };
     });
     
