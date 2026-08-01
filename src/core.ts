@@ -3,22 +3,55 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { randomInt } from "node:crypto";
+import { createRequire } from "node:module";
 import type { AnnotationResult, ElementSelection, EditCapture } from "../types.js";
+
+const require = createRequire(import.meta.url);
+const {
+  resolveRuntimeDirectory,
+} = require("./runtime-paths.cjs") as {
+  resolveRuntimeDirectory: (options?: {
+    env?: NodeJS.ProcessEnv;
+    platform?: NodeJS.Platform;
+    tmpdir?: string;
+    userId?: number | string;
+  }) => {
+    registryDir: string;
+    source: "explicit" | "xdg" | "temp";
+  };
+};
+
+function resolveDefaultRegistryDir(): { registryDir: string } {
+  try {
+    const userId = typeof process.getuid === "function" ? process.getuid() : "user";
+    const resolved = resolveRuntimeDirectory({
+      env: process.env,
+      platform: process.platform,
+      tmpdir: os.tmpdir(),
+      userId,
+    });
+    return { registryDir: resolved.registryDir };
+  } catch (err) {
+    void err;
+    return {
+      registryDir: path.join(
+        os.tmpdir(),
+        `pi-annotate-${typeof process.getuid === "function" ? process.getuid() : "user"}`,
+      ),
+    };
+  }
+}
+
+const DEFAULT_REGISTRY = resolveDefaultRegistryDir();
 
 /** Legacy single-browser paths, retained as a fallback for older native hosts. */
 export const SOCKET_PATH = "/tmp/pi-annotate.sock";
 export const TOKEN_PATH = "/tmp/pi-annotate.token";
-export const REGISTRY_DIR = process.env.PI_ANNOTATE_REGISTRY_DIR
-  ? path.resolve(process.env.PI_ANNOTATE_REGISTRY_DIR)
-  : path.join(
-      os.tmpdir(),
-      `pi-annotate-${typeof process.getuid === "function" ? process.getuid() : "user"}`,
-    );
+export const REGISTRY_DIR = DEFAULT_REGISTRY.registryDir;
 const MAX_SOCKET_BUFFER = 32 * 1024 * 1024; // 32MB (increased from 8MB for edit capture payloads)
 const MAX_SCREENSHOT_BYTES = 15 * 1024 * 1024; // 15MB
 
-export const NOT_CONNECTED_MESSAGE =
-  "Browser extension not connected. Click the Pi Annotate icon in the browser to wake the service worker, then retry.";
+export const NOT_CONNECTED_MESSAGE = "Browser extension not connected.";
 
 export type AnnotateParams = {
   url?: string;
@@ -59,6 +92,299 @@ export type BrowserTarget = {
   updatedAt: string;
 };
 
+type BrowserTargetCandidate = BrowserTarget & {
+  missingSocket: boolean;
+  missingToken: boolean;
+};
+
+function isFsErrorCode(err: unknown, code: string): boolean {
+  return !!err
+    && typeof err === "object"
+    && "code" in err
+    && typeof (err as { code?: unknown }).code === "string"
+    && (err as { code: string }).code === code;
+}
+
+function filesystemCodeFromError(err: unknown): string | undefined {
+  return err && typeof err === "object" && "code" in err && typeof (err as { code?: unknown }).code === "string"
+    ? (err as { code: string }).code
+    : undefined;
+}
+
+function isWithinDirectory(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+type BrowserRegistryFs = Pick<typeof fs, "existsSync" | "readFileSync" | "readdirSync">;
+
+function parseBrowserTargetCandidate(value: unknown, registryDir: string, fsOps: BrowserRegistryFs): BrowserTargetCandidate | null {
+  if (!isRecord(value)) return null;
+  const requiredStrings = ["id", "name", "browser", "socketPath", "tokenPath", "connectedAt", "updatedAt"];
+  if (requiredStrings.some((key) => typeof value[key] !== "string")) return null;
+  if (typeof value.pid !== "number" || !isLiveProcess(value.pid)) return null;
+
+  const socketPath = path.resolve(value.socketPath as string);
+  const tokenPath = path.resolve(value.tokenPath as string);
+  if (!isWithinDirectory(registryDir, socketPath) || !isWithinDirectory(registryDir, tokenPath)) return null;
+
+  return {
+    id: value.id as string,
+    name: value.name as string,
+    browser: value.browser as string,
+    socketPath,
+    tokenPath,
+    pid: value.pid,
+    connectedAt: value.connectedAt as string,
+    updatedAt: value.updatedAt as string,
+    missingSocket: !fsOps.existsSync(socketPath),
+    missingToken: !fsOps.existsSync(tokenPath),
+  };
+}
+
+function inspectBrowserRegistry(registryDir: string, fsOps: BrowserRegistryFs = fs): BrowserRegistryInspection {
+  try {
+    const entries = fsOps.readdirSync(registryDir).filter((entry) => entry.endsWith(".json"));
+    if (entries.length === 0) {
+      return { kind: "registry-empty", registryDir };
+    }
+
+    const newestById = new Map<string, BrowserTarget>();
+    let staleTarget: BrowserTargetCandidate | null = null;
+    let staleLegacyTarget: BrowserTargetCandidate | null = null;
+    for (const entry of entries) {
+      try {
+        const parsed = parseBrowserTargetCandidate(JSON.parse(fsOps.readFileSync(path.join(registryDir, entry), "utf8")), registryDir, fsOps);
+        if (!parsed) continue;
+        if (parsed.missingSocket || parsed.missingToken) {
+          if (!staleTarget || parsed.updatedAt > staleTarget.updatedAt) {
+            staleTarget = parsed;
+          }
+          if (parsed.socketPath === SOCKET_PATH && parsed.tokenPath === TOKEN_PATH) {
+            if (!staleLegacyTarget || parsed.updatedAt > staleLegacyTarget.updatedAt) {
+              staleLegacyTarget = parsed;
+            }
+          }
+          continue;
+        }
+        const liveTarget: BrowserTarget = {
+          id: parsed.id,
+          name: parsed.name,
+          browser: parsed.browser,
+          socketPath: parsed.socketPath,
+          tokenPath: parsed.tokenPath,
+          pid: parsed.pid,
+          connectedAt: parsed.connectedAt,
+          updatedAt: parsed.updatedAt,
+        };
+        const existing = newestById.get(liveTarget.id);
+        if (!existing || liveTarget.updatedAt > existing.updatedAt) newestById.set(liveTarget.id, liveTarget);
+      } catch (err) {
+        if (isFsErrorCode(err, "EACCES") || isFsErrorCode(err, "EPERM")) {
+          return { kind: "registry-permission-denied", registryDir, filesystemCode: filesystemCodeFromError(err) };
+        }
+        // A host may be atomically replacing its metadata while we scan.
+      }
+    }
+
+    if (newestById.size === 0) {
+      if (staleLegacyTarget) {
+        return {
+          kind: "legacy-endpoint-disappeared",
+          registryDir,
+        };
+      }
+      if (staleTarget) {
+        return {
+          kind: "endpoint-disappeared",
+          registryDir,
+        };
+      }
+      return { kind: "registry-empty", registryDir };
+    }
+
+    return {
+      kind: "targets",
+      registryDir,
+      targets: [...newestById.values()].sort((a, b) =>
+        a.name.localeCompare(b.name) || a.browser.localeCompare(b.browser) || a.id.localeCompare(b.id),
+      ),
+    };
+  } catch (err) {
+    if (isFsErrorCode(err, "EACCES") || isFsErrorCode(err, "EPERM")) {
+      return { kind: "registry-permission-denied", registryDir, filesystemCode: filesystemCodeFromError(err) };
+    }
+    return { kind: "registry-missing", registryDir, filesystemCode: filesystemCodeFromError(err) };
+  }
+}
+
+function inspectionToFailure(inspection: BrowserRegistryInspection): ConnectionFailure {
+  switch (inspection.kind) {
+    case "registry-missing":
+      return {
+        category: "registry-missing",
+        registryDir: inspection.registryDir,
+        filesystemCode: inspection.filesystemCode,
+      };
+    case "registry-permission-denied":
+      return {
+        category: "registry-permission-denied",
+        registryDir: inspection.registryDir,
+        filesystemCode: inspection.filesystemCode,
+      };
+    case "registry-empty":
+      return {
+        category: "registry-empty",
+        registryDir: inspection.registryDir,
+      };
+    case "endpoint-disappeared":
+      return {
+        category: "endpoint-disappeared",
+        registryDir: inspection.registryDir,
+      };
+    case "legacy-endpoint-disappeared":
+      return {
+        category: "legacy-endpoint-disappeared",
+        registryDir: inspection.registryDir,
+      };
+    case "targets":
+      return {
+        category: "registry-empty",
+        registryDir: inspection.registryDir,
+      };
+  }
+}
+
+export function formatConnectionFailure(failure: ConnectionFailure): string {
+  const prefix = `${NOT_CONNECTED_MESSAGE}`;
+  switch (failure.category) {
+    case "registry-missing":
+      return `${prefix} Selected registry directory ${JSON.stringify(failure.registryDir)} is not visible from this environment${failure.filesystemCode ? ` (${failure.filesystemCode})` : ""}. Set the same PI_ANNOTATE_REGISTRY_DIR in the native host and the agent.`;
+    case "registry-permission-denied":
+      return `${prefix} Selected registry directory ${JSON.stringify(failure.registryDir)} cannot be read from this environment${failure.filesystemCode ? ` (${failure.filesystemCode})` : ""}. Set the same PI_ANNOTATE_REGISTRY_DIR in the native host and the agent.`;
+    case "registry-empty":
+      return `${prefix} No live browser metadata was found in ${JSON.stringify(failure.registryDir)}. Click the Pi Annotate icon in the browser to wake the service worker, then retry.`;
+    case "endpoint-disappeared":
+      return `${prefix} Browser metadata in ${JSON.stringify(failure.registryDir)} disappeared before AUTH completed${failure.filesystemCode ? ` (${failure.filesystemCode})` : ""}.`;
+    case "legacy-endpoint-disappeared":
+      return `${prefix} Legacy /tmp/pi-annotate.sock and /tmp/pi-annotate.token disappeared before AUTH completed${failure.filesystemCode ? ` (${failure.filesystemCode})` : ""}.`;
+  }
+}
+
+export function createConnectionNotificationGate(
+  windowMs = 5_000,
+  now: () => number = () => globalThis.performance?.now?.() ?? Date.now(),
+) {
+  let lastMessage = "";
+  let lastAt = 0;
+  return {
+    shouldNotify(message: string) {
+      const current = now();
+      if (message === lastMessage && current - lastAt < windowMs) {
+        return false;
+      }
+      lastMessage = message;
+      lastAt = current;
+      return true;
+    },
+    reset() {
+      lastMessage = "";
+      lastAt = 0;
+    },
+  };
+}
+
+function discoveryToFailure(inspection: BrowserRegistryInspection): ConnectionFailure {
+  return inspectionToFailure(inspection);
+}
+
+export function inspectBrowserRegistryState(registryDir = REGISTRY_DIR, fsOps: BrowserRegistryFs = fs): BrowserRegistryInspection {
+  return inspectBrowserRegistry(registryDir, fsOps);
+}
+
+function failureFromEndpoint(
+  endpoint: { registryDir: string; socketPath: string; tokenPath: string; target: BrowserTarget | null },
+  err: unknown,
+): ConnectionFailure {
+  const filesystemCode = filesystemCodeFromError(err);
+  if (endpoint.target?.id === "legacy") {
+    return {
+      category: "legacy-endpoint-disappeared",
+      registryDir: endpoint.registryDir,
+      filesystemCode,
+    };
+  }
+  return {
+    category: "endpoint-disappeared",
+    registryDir: endpoint.registryDir,
+    filesystemCode,
+  };
+}
+
+type BrowserRegistryInspection =
+  | {
+      kind: "targets";
+      registryDir: string;
+      targets: BrowserTarget[];
+    }
+  | {
+      kind: "registry-missing";
+      registryDir: string;
+      filesystemCode?: string;
+    }
+  | {
+      kind: "registry-permission-denied";
+      registryDir: string;
+      filesystemCode?: string;
+    }
+  | {
+      kind: "registry-empty";
+      registryDir: string;
+    }
+  | {
+      kind: "endpoint-disappeared";
+      registryDir: string;
+    }
+  | {
+      kind: "legacy-endpoint-disappeared";
+      registryDir: string;
+    };
+
+export type ConnectionFailure =
+  | {
+      category: "registry-missing";
+      registryDir: string;
+      filesystemCode?: string;
+    }
+  | {
+      category: "registry-permission-denied";
+      registryDir: string;
+      filesystemCode?: string;
+    }
+  | {
+      category: "registry-empty";
+      registryDir: string;
+    }
+  | {
+      category: "endpoint-disappeared";
+      registryDir: string;
+    }
+  | {
+      category: "legacy-endpoint-disappeared";
+      registryDir: string;
+      filesystemCode?: string;
+    };
+
+export class ConnectionFailureError extends Error {
+  readonly failure: ConnectionFailure;
+
+  constructor(failure: ConnectionFailure) {
+    super(formatConnectionFailure(failure));
+    this.name = "ConnectionFailureError";
+    this.failure = failure;
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -91,57 +417,10 @@ function isLiveProcess(pid: number): boolean {
   }
 }
 
-function parseBrowserTarget(value: unknown, registryDir: string): BrowserTarget | null {
-  if (!isRecord(value)) return null;
-  const requiredStrings = ["id", "name", "browser", "socketPath", "tokenPath", "connectedAt", "updatedAt"];
-  if (requiredStrings.some((key) => typeof value[key] !== "string")) return null;
-  if (typeof value.pid !== "number" || !isLiveProcess(value.pid)) return null;
-
-  const socketPath = path.resolve(value.socketPath as string);
-  const tokenPath = path.resolve(value.tokenPath as string);
-  const registryRoot = `${path.resolve(registryDir)}${path.sep}`;
-  if (!socketPath.startsWith(registryRoot) || !tokenPath.startsWith(registryRoot)) return null;
-  if (!fs.existsSync(socketPath) || !fs.existsSync(tokenPath)) return null;
-
-  return {
-    id: value.id as string,
-    name: value.name as string,
-    browser: value.browser as string,
-    socketPath,
-    tokenPath,
-    pid: value.pid,
-    connectedAt: value.connectedAt as string,
-    updatedAt: value.updatedAt as string,
-  };
-}
-
 /** Discover live browser/profile endpoints published by native host instances. */
 export function listBrowserTargets(registryDir = REGISTRY_DIR): BrowserTarget[] {
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(registryDir).filter((entry) => entry.endsWith(".json"));
-  } catch {
-    return [];
-  }
-
-  const newestById = new Map<string, BrowserTarget>();
-  for (const entry of entries) {
-    try {
-      const parsed = parseBrowserTarget(
-        JSON.parse(fs.readFileSync(path.join(registryDir, entry), "utf8")),
-        registryDir,
-      );
-      if (!parsed) continue;
-      const existing = newestById.get(parsed.id);
-      if (!existing || parsed.updatedAt > existing.updatedAt) newestById.set(parsed.id, parsed);
-    } catch {
-      // A host may be atomically replacing its metadata while we scan.
-    }
-  }
-
-  return [...newestById.values()].sort((a, b) =>
-    a.name.localeCompare(b.name) || a.browser.localeCompare(b.browser) || a.id.localeCompare(b.id),
-  );
+  const inspection = inspectBrowserRegistryState(registryDir);
+  return inspection.kind === "targets" ? inspection.targets : [];
 }
 
 export function formatBrowserTargets(targets: BrowserTarget[]): string {
@@ -152,10 +431,33 @@ export function resolveBrowserTarget(
   selector: string | undefined,
   registryDir = REGISTRY_DIR,
 ): BrowserTarget {
-  const targets = listBrowserTargets(registryDir);
+  const inspection = inspectBrowserRegistryState(registryDir);
+  const targets = inspection.kind === "targets" ? inspection.targets : [];
+  const wanted = selector?.trim();
+  const wantedLower = wanted?.toLocaleLowerCase();
+  const wantsLegacy = !!wantedLower && ["legacy", "legacy browser"].includes(wantedLower);
+
+  if (wantsLegacy) {
+    if (fs.existsSync(SOCKET_PATH) && fs.existsSync(TOKEN_PATH)) {
+      return {
+        id: "legacy",
+        name: "Legacy browser",
+        browser: "Chrome/Chromium",
+        socketPath: SOCKET_PATH,
+        tokenPath: TOKEN_PATH,
+        pid: 0,
+        connectedAt: "",
+        updatedAt: "",
+      };
+    }
+    throw new ConnectionFailureError({
+      category: "legacy-endpoint-disappeared",
+      registryDir,
+    });
+  }
+
+  const acceptsLegacy = !wanted || ["legacy", "legacy browser"].includes(wanted.toLocaleLowerCase());
   if (targets.length === 0) {
-    const wanted = selector?.trim();
-    const acceptsLegacy = !wanted || ["legacy", "legacy browser"].includes(wanted.toLocaleLowerCase());
     if (acceptsLegacy && fs.existsSync(SOCKET_PATH) && fs.existsSync(TOKEN_PATH)) {
       return {
         id: "legacy",
@@ -168,10 +470,9 @@ export function resolveBrowserTarget(
         updatedAt: "",
       };
     }
-    throw new Error("No browser profiles are connected");
+    throw new ConnectionFailureError(discoveryToFailure(inspection));
   }
 
-  const wanted = selector?.trim();
   if (!wanted) {
     if (targets.length === 1) return targets[0];
     throw new Error(
@@ -259,19 +560,20 @@ export class AnnotateClient {
     return this.connectedTarget;
   }
 
-  private resolveEndpoint(): { socketPath: string; tokenPath: string; target: BrowserTarget | null } {
+  private resolveEndpoint(): { registryDir: string; socketPath: string; tokenPath: string; target: BrowserTarget | null } {
     if (this.configuredSocketPath || this.configuredTokenPath) {
       if (!this.configuredSocketPath || !this.configuredTokenPath) {
         throw new Error("socketPath and tokenPath must be provided together");
       }
       return {
+        registryDir: this.registryDir,
         socketPath: this.configuredSocketPath,
         tokenPath: this.configuredTokenPath,
         target: null,
       };
     }
     const target = resolveBrowserTarget(this.browserSelector, this.registryDir);
-    return { socketPath: target.socketPath, tokenPath: target.tokenPath, target };
+    return { registryDir: this.registryDir, socketPath: target.socketPath, tokenPath: target.tokenPath, target };
   }
 
   /**
@@ -306,10 +608,7 @@ export class AnnotateClient {
       try {
         token = fs.readFileSync(endpoint.tokenPath, "utf8").trim();
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        reject(
-          new Error(`Failed to read auth token at ${endpoint.tokenPath}: ${message}`, { cause: err }),
-        );
+        reject(new ConnectionFailureError(failureFromEndpoint(endpoint, err)));
         return;
       }
 
@@ -378,8 +677,12 @@ export class AnnotateClient {
 
       socket.on("error", (err) => {
         if (this.browserSocket !== socket && settled) return;
+        if (!settled) {
+          this.setStatus(`Error: ${err.message}`);
+          settleErr(new ConnectionFailureError(failureFromEndpoint(endpoint, err)));
+          return;
+        }
         this.setStatus(`Error: ${err.message}`);
-        settleErr(err);
       });
 
       socket.on("close", () => {

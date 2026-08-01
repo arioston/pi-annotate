@@ -2,9 +2,11 @@ import { Type } from "typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   AnnotateClient,
+  ConnectionFailureError,
+  createConnectionNotificationGate,
+  formatConnectionFailure,
   formatResult,
   formatToolResult,
-  NOT_CONNECTED_MESSAGE,
 } from "./src/core.js";
 import {
   listIssueReports,
@@ -23,6 +25,17 @@ type AnnotationContext = {
 export default function (pi: ExtensionAPI) {
   let currentCtx: AnnotationContext | null = null;
   const issueRequestIds = new Set<number>();
+  const connectionNoticeGate = createConnectionNotificationGate(
+    5_000,
+    typeof performance !== "undefined" && typeof performance.now === "function"
+      ? () => performance.now()
+      : () => Date.now(),
+  );
+
+  const notifyConnectionError = (ctx: AnnotationContext, message: string) => {
+    if (!connectionNoticeGate.shouldNotify(message)) return;
+    ctx.ui?.notify?.(message, "error");
+  };
 
   const clients = new Map<string, AnnotateClient>();
   const getClient = (browser?: string) => {
@@ -76,12 +89,12 @@ export default function (pi: ExtensionAPI) {
     try {
       const client = getClient();
       await client.startAnnotation(url);
+      connectionNoticeGate.reset();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      ctx.ui?.notify(
-        `Browser extension not connected. ${message}. Click the Pi Annotate icon in the browser to wake the service worker, then retry.`,
-        "error",
-      );
+      const message = err instanceof ConnectionFailureError
+        ? formatConnectionFailure(err.failure)
+        : `Could not start annotation: ${err instanceof Error ? err.message : String(err)}`;
+      notifyConnectionError(ctx, message);
       return;
     }
 
@@ -107,8 +120,10 @@ export default function (pi: ExtensionAPI) {
         issueRequestIds.add(requestId);
         ctx.ui?.notify("Issue annotation started; the completed report will be saved locally", "info");
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        ctx.ui?.notify(`Could not start issue annotation: ${message}`, "error");
+        const message = err instanceof ConnectionFailureError
+          ? formatConnectionFailure(err.failure)
+          : `Could not start issue annotation: ${err instanceof Error ? err.message : String(err)}`;
+        notifyConnectionError(ctx, message);
       }
     },
   });
@@ -170,9 +185,13 @@ export default function (pi: ExtensionAPI) {
               : result,
         };
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = err instanceof ConnectionFailureError
+          ? formatConnectionFailure(err.failure)
+          : err instanceof Error
+            ? err.message
+            : String(err);
         return {
-          content: [{ type: "text", text: NOT_CONNECTED_MESSAGE }],
+          content: [{ type: "text", text: message }],
           details: { error: message },
         };
       }
@@ -235,7 +254,11 @@ export default function (pi: ExtensionAPI) {
           details: report,
         };
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = err instanceof ConnectionFailureError
+          ? formatConnectionFailure(err.failure)
+          : err instanceof Error
+            ? err.message
+            : String(err);
         return {
           content: [{ type: "text", text: `Could not create local issue report: ${message}` }],
           details: { error: message },

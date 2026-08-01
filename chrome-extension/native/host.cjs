@@ -4,16 +4,28 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const {
+  resolveRuntimeDirectory,
+} = require("../../src/runtime-paths.cjs");
 
-const USER_ID = typeof process.getuid === "function" ? process.getuid() : "user";
-const REGISTRY_DIR = process.env.PI_ANNOTATE_REGISTRY_DIR
-  ? path.resolve(process.env.PI_ANNOTATE_REGISTRY_DIR)
-  : path.join(os.tmpdir(), `pi-annotate-${USER_ID}`);
 const INSTANCE_ID = crypto.randomBytes(12).toString("hex");
-const SOCKET_PATH = path.join(REGISTRY_DIR, `${INSTANCE_ID}.sock`);
-const TOKEN_PATH = path.join(REGISTRY_DIR, `${INSTANCE_ID}.token`);
-const METADATA_PATH = path.join(REGISTRY_DIR, `${INSTANCE_ID}.json`);
-const LOG_FILE = path.join(REGISTRY_DIR, `${INSTANCE_ID}.log`);
+let REGISTRY_PATHS;
+try {
+  REGISTRY_PATHS = resolveRuntimeDirectory({
+    env: process.env,
+    platform: process.platform,
+    tmpdir: os.tmpdir(),
+    userId: typeof process.getuid === "function" ? process.getuid() : "user",
+  });
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+}
+const REGISTRY_DIR = REGISTRY_PATHS.registryDir;
+const SOCKET_PATH = path.join(REGISTRY_DIR, `pi-annotate-${INSTANCE_ID}.sock`);
+const TOKEN_PATH = path.join(REGISTRY_DIR, `pi-annotate-${INSTANCE_ID}.token`);
+const METADATA_PATH = path.join(REGISTRY_DIR, `pi-annotate-${INSTANCE_ID}.json`);
+const LOG_FILE = path.join(REGISTRY_DIR, `pi-annotate-${INSTANCE_ID}.log`);
 const MAX_NATIVE_MESSAGE_BYTES = 32 * 1024 * 1024; // 32MB (increased from 8MB for edit capture payloads)
 const MAX_SOCKET_BUFFER = 32 * 1024 * 1024; // 32MB
 const MAX_LOG_BYTES = 5 * 1024 * 1024; // 5MB

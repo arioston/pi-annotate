@@ -12,10 +12,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   AnnotateClient,
+  ConnectionFailureError,
   formatBrowserTargets,
+  formatConnectionFailure,
   formatToolResult,
   listBrowserTargets,
-  NOT_CONNECTED_MESSAGE,
 } from "./core.js";
 import {
   listIssueReports,
@@ -127,13 +128,17 @@ async function main() {
           isError,
         };
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = err instanceof ConnectionFailureError
+          ? formatConnectionFailure(err.failure)
+          : err instanceof Error
+            ? err.message
+            : String(err);
         console.error(`[pi-annotate] connect error: ${message}`);
         return {
           content: [
             {
               type: "text" as const,
-              text: `${NOT_CONNECTED_MESSAGE} (${message})`,
+              text: message,
             },
           ],
           isError: true,
@@ -209,7 +214,11 @@ async function main() {
           structuredContent,
         };
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = err instanceof ConnectionFailureError
+          ? formatConnectionFailure(err.failure)
+          : err instanceof Error
+            ? err.message
+            : String(err);
         console.error(`[pi-annotate] issue report error: ${message}`);
         return {
           content: [{ type: "text" as const, text: `Could not create local issue report: ${message}` }],

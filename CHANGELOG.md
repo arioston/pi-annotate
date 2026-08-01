@@ -15,6 +15,7 @@ All notable changes to Pi Annotate.
 ### Changed
 - Native host instances publish isolated per-user socket/token metadata instead of competing for one global `/tmp/pi-annotate.sock`
 - Session replacement is scoped to the displaced request and no longer disconnects the entire client
+- Browser extension, native host, and MCP clients now share the same runtime-directory contract across sandbox namespaces, with `PI_ANNOTATE_REGISTRY_DIR` override support and legacy `/tmp` compatibility for older hosts
 
 ## [0.5.0] - 2026-07-29
 

@@ -53,6 +53,14 @@ The popup shows your extension ID. Click **Copy** next to the install command, t
 
 This installs the native messaging manifest for Google Chrome, Google Chrome for Testing, and Chromium on macOS, plus the default/current config-home locations for those browsers on Linux. Fully quit and reopen that browser. The popup will show **Connected** when ready.
 
+If the browser and agent run in different sandboxes or temp namespaces, pass an explicit shared registry directory:
+
+```bash
+./install.sh <extension-id> --registry-dir /absolute/path/to/shared-registry
+```
+
+`PI_ANNOTATE_REGISTRY_DIR` is the authoritative runtime-directory override, and the native host and agent must use the same absolute path when they do not share a temp namespace. The registry directory itself uses `0700` permissions; the socket, token, and metadata files use `0600`. Older hosts using `/tmp/pi-annotate.sock` and `/tmp/pi-annotate.token` remain supported as a legacy fallback. Reinstall the host and fully quit/reopen the browser after changing the registry path.
+
 If you use Pi Annotate in more than one browser or profile, give each one a unique **Browser profile name** in its extension popup (for example, `Work Chrome` and `Personal Chromium`). Each profile publishes an independent connection.
 
 
@@ -283,6 +291,8 @@ Native Host B ── Chromium personal profile
 
 Each native host publishes its metadata, socket, token, and log under `/tmp/pi-annotate-<uid>/`. The directory uses 0700 permissions; endpoint files use 0600. Older hosts using `/tmp/pi-annotate.sock` and `/tmp/pi-annotate.token` remain supported as a single-browser fallback.
 
+When browser and agent sandboxes do not share temp namespaces, set the same `PI_ANNOTATE_REGISTRY_DIR` for both sides, or install the native host with `--registry-dir`. If the browser sandbox cannot reach the host socket directly, run `pi-annotate-mcp` on the host side instead and point it at the same shared registry.
+
 ## Development
 
 No build step. Edit `content.js` or `background.js` directly, reload at `chrome://extensions`. Pi extension (TypeScript) loads via jiti — restart pi after changes.
@@ -301,7 +311,7 @@ tail -f /tmp/pi-annotate-$(id -u)/*.log              # Native host logs
 | "restricted URL" error | Provide a URL: `/annotate https://example.com` |
 | Native host not connecting | Click extension icon → check status, re-run install, fully restart the supported browser |
 | "Extension ID mismatch" | Copy install command from popup, re-run |
-| Socket/profile errors | `ls -la /tmp/pi-annotate-$(id -u)/` and call MCP `list_browsers` |
+| Socket/profile errors | `ls -la /tmp/pi-annotate-$(id -u)/`, compare `PI_ANNOTATE_REGISTRY_DIR` on host and agent, and call MCP `list_browsers` |
 
 **Verify native host:**
 - macOS Google Chrome: `cat ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.pi.annotate.json`
