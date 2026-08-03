@@ -22,24 +22,17 @@ const {
 };
 
 function resolveDefaultRegistryDir(): { registryDir: string } {
-  try {
-    const userId = typeof process.getuid === "function" ? process.getuid() : "user";
-    const resolved = resolveRuntimeDirectory({
-      env: process.env,
-      platform: process.platform,
-      tmpdir: os.tmpdir(),
-      userId,
-    });
-    return { registryDir: resolved.registryDir };
-  } catch (err) {
-    void err;
-    return {
-      registryDir: path.join(
-        os.tmpdir(),
-        `pi-annotate-${typeof process.getuid === "function" ? process.getuid() : "user"}`,
-      ),
-    };
-  }
+  // Do not catch-and-fall-back here: an invalid explicit PI_ANNOTATE_REGISTRY_DIR
+  // or XDG_RUNTIME_DIR must fail deterministically, not silently redirect to a
+  // temp directory the host and agent may resolve differently.
+  const userId = typeof process.getuid === "function" ? process.getuid() : "user";
+  const resolved = resolveRuntimeDirectory({
+    env: process.env,
+    platform: process.platform,
+    tmpdir: os.tmpdir(),
+    userId,
+  });
+  return { registryDir: resolved.registryDir };
 }
 
 const DEFAULT_REGISTRY = resolveDefaultRegistryDir();

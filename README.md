@@ -59,7 +59,7 @@ If the browser and agent run in different sandboxes or temp namespaces, pass an 
 ./install.sh <extension-id> --registry-dir /absolute/path/to/shared-registry
 ```
 
-`PI_ANNOTATE_REGISTRY_DIR` is the authoritative runtime-directory override, and the native host and agent must use the same absolute path when they do not share a temp namespace. The registry directory itself uses `0700` permissions; the socket, token, and metadata files use `0600`. Older hosts using `/tmp/pi-annotate.sock` and `/tmp/pi-annotate.token` remain supported as a legacy fallback. Reinstall the host and fully quit/reopen the browser after changing the registry path.
+`PI_ANNOTATE_REGISTRY_DIR` is the authoritative runtime-directory override, and the native host and agent must use the same absolute path when they do not share a temp namespace. The registry directory itself uses `0700` permissions; the socket, token, and metadata files use `0600`. Older hosts using `/tmp/pi-annotate.sock` and `/tmp/pi-annotate.token` remain supported as a legacy fallback. Reinstall the host and fully quit/reopen the browser after changing the registry path. A relative, empty, or otherwise invalid `PI_ANNOTATE_REGISTRY_DIR` (or `XDG_RUNTIME_DIR`) fails immediately with a configuration error instead of silently falling back to a temp directory the other side may not share.
 
 If you use Pi Annotate in more than one browser or profile, give each one a unique **Browser profile name** in its extension popup (for example, `Work Chrome` and `Personal Chromium`). Each profile publishes an independent connection.
 

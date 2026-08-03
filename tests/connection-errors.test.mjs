@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -115,4 +117,66 @@ test("legacy selector without legacy files reports legacy-endpoint-disappeared",
   });
   assert.match(message, /Legacy \/tmp\/pi-annotate\.sock and \/tmp\/pi-annotate\.token disappeared before AUTH completed/);
   await rm(registryDir, { recursive: true, force: true });
+});
+
+async function importCoreInChild(envOverrides, keysToDelete = []) {
+  const env = { ...process.env, ...envOverrides };
+  for (const key of keysToDelete) delete env[key];
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx/esm", "-e", "import('./src/core.ts').then(m => console.log('IMPORT_OK', m.REGISTRY_DIR))"],
+    {
+      cwd: new URL("..", import.meta.url),
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  const [code] = await once(child, "close");
+  return { code, stdout, stderr };
+}
+
+test("invalid explicit PI_ANNOTATE_REGISTRY_DIR fails core.ts import instead of silently falling back to temp", async () => {
+  const { code, stdout, stderr } = await importCoreInChild(
+    { PI_ANNOTATE_REGISTRY_DIR: "relative/not-absolute" },
+    ["XDG_RUNTIME_DIR"],
+  );
+  assert.notEqual(code, 0);
+  assert.doesNotMatch(stdout, /IMPORT_OK/);
+  assert.match(stderr, /RuntimePathConfigurationError/);
+  assert.match(stderr, /PI_ANNOTATE_REGISTRY_DIR/);
+  assert.match(stderr, /absolute/);
+});
+
+test("invalid explicit XDG_RUNTIME_DIR fails core.ts import instead of silently falling back to temp", async () => {
+  const { code, stdout, stderr } = await importCoreInChild(
+    { XDG_RUNTIME_DIR: "relative/xdg" },
+    ["PI_ANNOTATE_REGISTRY_DIR"],
+  );
+  assert.notEqual(code, 0);
+  assert.doesNotMatch(stdout, /IMPORT_OK/);
+  assert.match(stderr, /RuntimePathConfigurationError/);
+  assert.match(stderr, /XDG_RUNTIME_DIR/);
+  assert.match(stderr, /absolute/);
+});
+
+test("valid explicit PI_ANNOTATE_REGISTRY_DIR still resolves core.ts REGISTRY_DIR normally", async () => {
+  const explicitDir = await mkdtemp(path.join(os.tmpdir(), ".pi-annotate-explicit-"));
+  try {
+    const { code, stdout } = await importCoreInChild(
+      { PI_ANNOTATE_REGISTRY_DIR: explicitDir },
+      ["XDG_RUNTIME_DIR"],
+    );
+    assert.equal(code, 0);
+    assert.match(stdout, new RegExp(`IMPORT_OK ${explicitDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  } finally {
+    await rm(explicitDir, { recursive: true, force: true });
+  }
 });
