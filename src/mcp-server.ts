@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { effectiveBrowserSelector } from "./browser-profiles.js";
 /**
  * MCP stdio server exposing the `annotate` tool for Junie, Claude Code, Codex, etc.
  *
@@ -31,7 +32,7 @@ const annotateInputShape = {
   browser: z
     .string()
     .optional()
-    .describe("Browser profile name or id. Required when more than one profile is connected unless PI_ANNOTATE_BROWSER is set."),
+    .describe("Browser profile name, id, or surf:<label>. Defaults to PI_ANNOTATE_BROWSER, then BROWSER_PROFILE."),
   url: z
     .string()
     .optional()
@@ -53,7 +54,7 @@ async function main() {
   // server processes connect to the same profile safely.
   const clients = new Map<string, AnnotateClient>();
   const getClient = (browser?: string) => {
-    const selector = browser?.trim() || process.env.PI_ANNOTATE_BROWSER?.trim() || "";
+    const selector = effectiveBrowserSelector(browser);
     let client = clients.get(selector);
     if (!client) {
       client = new AnnotateClient({

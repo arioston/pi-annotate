@@ -316,3 +316,10 @@ Pi Extension ← Unix Socket → Native Host ← Native Messaging → Chrome Ext
 | Communication | Native messaging |
 | Chat | One-way submit |
 | Build step | None |
+
+## Unreleased
+
+- Add shared workspace browser selection through `BROWSER_PROFILE` and exact
+  `surf:<label>` browser ID bindings. Pi and MCP use the same selector precedence.
+- Reject missing, removed, malformed, or disconnected shared profile bindings.
+- Keep inherited runtime registry variables out of the isolated TMPDIR test.

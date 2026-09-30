@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -117,8 +117,13 @@ test("one browser host routes concurrent agent clients by request owner", async 
   const extensionMessages = [];
   readNativeMessages(host.stdout, (message) => extensionMessages.push(message));
 
-  const first = new AnnotateClient({ browser: browserId, registryDir });
-  const second = new AnnotateClient({ browser: browserId, registryDir });
+  const oldConfig = process.env.SURF_TARGETS_CONFIG_DIR;
+  process.env.SURF_TARGETS_CONFIG_DIR = registryDir;
+  t.after(() => { if (oldConfig === undefined) delete process.env.SURF_TARGETS_CONFIG_DIR; else process.env.SURF_TARGETS_CONFIG_DIR = oldConfig; });
+  await writeFile(path.join(registryDir, "targets.tsv"), "work\text\tdata\tprofile\taccount\textdir\n");
+  await writeFile(path.join(registryDir, "annotate-bindings.json"), JSON.stringify({ version: 1, bindings: { work: browserId } }));
+  const first = new AnnotateClient({ browser: "surf:work", registryDir });
+  const second = new AnnotateClient({ browser: "surf:work", registryDir });
   const firstResultPromise = first.annotate({ timeout: 3 });
 
   const firstStart = await waitFor(
@@ -204,13 +209,13 @@ test("isolated TMPDIR clients report the shared registry diagnostic instead of l
     }
   `;
 
+  const childEnv = { ...process.env, TMPDIR: clientTmpdir };
+  delete childEnv.XDG_RUNTIME_DIR;
+  delete childEnv.PI_ANNOTATE_REGISTRY_DIR;
   const child = spawn(process.execPath, ["--import", "tsx/esm", "--input-type=module", "-e", childScript], {
     cwd: new URL("..", import.meta.url),
     stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      TMPDIR: clientTmpdir,
-    },
+    env: childEnv,
   });
   let stdout = "";
   let stderr = "";
@@ -227,4 +232,56 @@ test("isolated TMPDIR clients report the shared registry diagnostic instead of l
   assert.equal(payload.category, "registry-missing");
   assert.match(payload.message, /Selected registry directory/);
   assert.doesNotMatch(payload.message, /pi-annotate\.token/i);
+});
+
+test("Pi and MCP adapters use the same bound ID and preserve request ownership", async (t) => {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const registryDir = await mkdtemp(path.join(os.tmpdir(), ".pi-annotate-adapters-"));
+  const hostTmpdir = await mkdtemp(path.join(os.tmpdir(), ".pi-annotate-adapter-host-"));
+  const { host, ready } = await startHost({ registryDir, tmpdir: hostTmpdir });
+  const previous = { BROWSER_PROFILE: process.env.BROWSER_PROFILE, PI_ANNOTATE_BROWSER: process.env.PI_ANNOTATE_BROWSER, PI_ANNOTATE_REGISTRY_DIR: process.env.PI_ANNOTATE_REGISTRY_DIR, SURF_TARGETS_CONFIG_DIR: process.env.SURF_TARGETS_CONFIG_DIR };
+  const browserId = `adapter-${process.pid}-${Date.now()}`;
+  host.stdin.write(nativeFrame({ type: "REGISTER_BROWSER", id: browserId, name: "surf:work", browser: "Chromium Test" }));
+  await ready;
+  await writeFile(path.join(registryDir, "targets.tsv"), "work\text\tdata\tprofile\t\textdir\n");
+  await writeFile(path.join(registryDir, "annotate-bindings.json"), JSON.stringify({ version: 1, bindings: { work: browserId } }));
+  Object.assign(process.env, { BROWSER_PROFILE: "work", SURF_TARGETS_CONFIG_DIR: registryDir });
+  delete process.env.PI_ANNOTATE_BROWSER;
+  const mcp = new Client({ name: "binding-test", version: "1" });
+  const transport = new StdioClientTransport({ command: process.execPath, args: ["bin/pi-annotate-mcp.js"], cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, PI_ANNOTATE_REGISTRY_DIR: registryDir } });
+  t.after(async () => {
+    await mcp.close(); await stopProcess(host);
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    await rm(registryDir, { recursive: true, force: true }); await rm(hostTmpdir, { recursive: true, force: true });
+  });
+  await mcp.connect(transport);
+  assert.ok((await mcp.listTools()).tools.some((tool) => tool.name === "annotate"));
+  const messages = [];
+  readNativeMessages(host.stdout, (message) => messages.push(message));
+  const resultPromise = mcp.callTool({ name: "annotate", arguments: { timeout: 3 } });
+  const start = await waitFor(() => messages.find((message) => message.type === "START_ANNOTATION"), "MCP did not reach the bound ID");
+  const piScript = `
+    import extension from "./index.ts";
+    const tools = new Map();
+    extension({ registerCommand() {}, registerTool(tool) { tools.set(tool.name, tool); }, sendUserMessage() {} });
+    const result = await tools.get("annotate").execute("test", { timeout: 3 }, undefined, undefined, { hasUI: false });
+    console.log(JSON.stringify(result));
+    process.exit(0);
+  `;
+  const pi = spawn(process.execPath, ["--import", "tsx/esm", "--input-type=module", "-e", piScript], { cwd: new URL("..", import.meta.url), env: { ...process.env, PI_ANNOTATE_REGISTRY_DIR: registryDir }, stdio: ["ignore", "pipe", "pipe"] });
+  t.after(() => stopProcess(pi));
+  let piOutput = "";
+  let piError = "";
+  pi.stdout.on("data", (chunk) => { piOutput += chunk; });
+  pi.stderr.on("data", (chunk) => { piError += chunk; });
+  const piExit = once(pi, "exit");
+  const piStart = await waitFor(() => messages.find((message) => message.type === "START_ANNOTATION" && message.requestId !== start.requestId), "Pi did not reach the same bound ID");
+  const cancelled = await resultPromise;
+  assert.match(JSON.stringify(cancelled), /Another client/);
+  host.stdin.write(nativeFrame({ type: "ANNOTATIONS_COMPLETE", requestId: piStart.requestId, result: { success: true, elements: [], url: "https://example.test", viewport: { width: 1, height: 1 } } }));
+  const [piCode] = await piExit;
+  assert.equal(piCode, 0, piError);
+  const result = JSON.parse(piOutput.trim());
+  assert.equal(result.details.success, true);
 });

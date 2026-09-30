@@ -327,3 +327,33 @@ If your Linux browser uses a different XDG config root, export `CHROME_CONFIG_HO
 ## License
 
 MIT
+
+## Shared Surf workspace profile
+
+Keep Surf and Pi Annotate, with both extensions and native hosts. Register each
+Surf profile with `surf-target add <label> --profile <selector>`. Open Pi Annotate
+in each profile and get its exact ID with `list_browsers`. Bind that ID with
+`surf-target annotate-bind work --browser-id example-work-id` (replace the
+example with the actual ID). Set `processEnv.BROWSER_PROFILE` to `work` in the
+workspace entry. Start a new client session and run
+`surf-target doctor --annotations`. Use `surf-target run --workspace -- surf tab.list`
+for Surf commands. Plain Surf keeps its existing default.
+
+The annotation `browser` argument wins over a nonempty `PI_ANNOTATE_BROWSER`.
+Next, `BROWSER_PROFILE=work` selects `surf:work`. Without these values, existing
+browser discovery stays active. Pi and local MCP clients use the same resolver.
+Remove old overrides only by operator choice. Labels must exist in Surf's
+`targets.tsv`. Reserved `surf:` selectors require an exact live browser ID;
+names, account email, partial matches, and legacy endpoints are not fallbacks.
+
+The device-local file `annotate-bindings.json` sits beside `targets.tsv` in
+`SURF_TARGETS_CONFIG_DIR` or `~/.config/surf-targets`. Its format is
+`{"version":1,"bindings":{"work":"example-work-id"}}`. IDs must be unique.
+Use `--replace` to change a binding or `surf-target annotate-unbind work` to
+remove it. Do not sync this file. Rebind after extension storage resets. Binding
+changes take effect when a client next connects; active requests keep their
+current connection. Setup does not overwrite bindings or workspace settings.
+
+Install the updated Pi Annotate fork first, then the updated Dalinar setup.
+Set workspace `BROWSER_PROFILE` only after both updates. Older forks lack strict
+discovery; the shared annotation doctor rejects them and asks for an update.

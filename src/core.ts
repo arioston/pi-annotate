@@ -1,3 +1,4 @@
+import { effectiveBrowserSelector, boundBrowserId } from "./browser-profiles.js";
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -135,7 +136,7 @@ function parseBrowserTargetCandidate(value: unknown, registryDir: string, fsOps:
   };
 }
 
-function inspectBrowserRegistry(registryDir: string, fsOps: BrowserRegistryFs = fs): BrowserRegistryInspection {
+function inspectBrowserRegistry(registryDir: string, fsOps: BrowserRegistryFs = fs, preserveDuplicateIds = false): BrowserRegistryInspection {
   try {
     const entries = fsOps.readdirSync(registryDir).filter((entry) => entry.endsWith(".json"));
     if (entries.length === 0) {
@@ -143,6 +144,7 @@ function inspectBrowserRegistry(registryDir: string, fsOps: BrowserRegistryFs = 
     }
 
     const newestById = new Map<string, BrowserTarget>();
+    const liveTargets: BrowserTarget[] = [];
     let staleTarget: BrowserTargetCandidate | null = null;
     let staleLegacyTarget: BrowserTargetCandidate | null = null;
     for (const entry of entries) {
@@ -170,6 +172,7 @@ function inspectBrowserRegistry(registryDir: string, fsOps: BrowserRegistryFs = 
           connectedAt: parsed.connectedAt,
           updatedAt: parsed.updatedAt,
         };
+        liveTargets.push(liveTarget);
         const existing = newestById.get(liveTarget.id);
         if (!existing || liveTarget.updatedAt > existing.updatedAt) newestById.set(liveTarget.id, liveTarget);
       } catch (err) {
@@ -199,7 +202,7 @@ function inspectBrowserRegistry(registryDir: string, fsOps: BrowserRegistryFs = 
     return {
       kind: "targets",
       registryDir,
-      targets: [...newestById.values()].sort((a, b) =>
+      targets: (preserveDuplicateIds ? liveTargets : [...newestById.values()]).sort((a, b) =>
         a.name.localeCompare(b.name) || a.browser.localeCompare(b.browser) || a.id.localeCompare(b.id),
       ),
     };
@@ -416,6 +419,13 @@ export function listBrowserTargets(registryDir = REGISTRY_DIR): BrowserTarget[] 
   return inspection.kind === "targets" ? inspection.targets : [];
 }
 
+/** Shared profile checks preserve duplicate endpoints instead of choosing one. */
+export function listBrowserTargetsStrict(registryDir = REGISTRY_DIR): BrowserTarget[] {
+  const inspection = inspectBrowserRegistry(registryDir, fs, true);
+  if (inspection.kind === "registry-permission-denied") throw new ConnectionFailureError(discoveryToFailure(inspection));
+  return inspection.kind === "targets" ? inspection.targets : [];
+}
+
 export function formatBrowserTargets(targets: BrowserTarget[]): string {
   return targets.map((target) => `${target.name} (${target.browser}, id: ${target.id})`).join(", ");
 }
@@ -424,9 +434,18 @@ export function resolveBrowserTarget(
   selector: string | undefined,
   registryDir = REGISTRY_DIR,
 ): BrowserTarget {
-  const inspection = inspectBrowserRegistryState(registryDir);
-  const targets = inspection.kind === "targets" ? inspection.targets : [];
   const wanted = selector?.trim();
+  const inspection = inspectBrowserRegistry(registryDir, fs, !!wanted?.startsWith("surf:"));
+  const targets = inspection.kind === "targets" ? inspection.targets : [];
+  if (wanted?.startsWith("surf:")) {
+    if (inspection.kind === "registry-permission-denied") throw new ConnectionFailureError(discoveryToFailure(inspection));
+    const id = boundBrowserId(wanted);
+    const matches = targets.filter((item) => item.id === id);
+    if (matches.length > 1) throw new Error(`Bound browser ID "${id}" is ambiguous. Rebind a unique profile ID.`);
+    const target = matches[0];
+    if (!target) throw new Error(`Bound browser "${id}" for ${wanted} is disconnected. Open its popup or rebind the ID.`);
+    return target;
+  }
   const wantedLower = wanted?.toLocaleLowerCase();
   const wantsLegacy = !!wantedLower && ["legacy", "legacy browser"].includes(wantedLower);
 
@@ -522,7 +541,7 @@ export class AnnotateClient {
     this.onUnmanagedComplete = options.onUnmanagedComplete;
     this.configuredSocketPath = options.socketPath;
     this.configuredTokenPath = options.tokenPath;
-    this.browserSelector = options.browser ?? process.env.PI_ANNOTATE_BROWSER;
+    this.browserSelector = effectiveBrowserSelector(options.browser) || undefined;
     this.registryDir = options.registryDir ?? REGISTRY_DIR;
     // A random safe-integer range prevents collisions across concurrent clients.
     this.nextRequestId = randomInt(1_000_000_000, 8_000_000_000) * 1_000_000;

@@ -1,3 +1,4 @@
+import { effectiveBrowserSelector } from "./src/browser-profiles.js";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
@@ -39,7 +40,7 @@ export default function (pi: ExtensionAPI) {
 
   const clients = new Map<string, AnnotateClient>();
   const getClient = (browser?: string) => {
-    const selector = browser?.trim() || process.env.PI_ANNOTATE_BROWSER?.trim() || "";
+    const selector = effectiveBrowserSelector(browser);
     let client = clients.get(selector);
     if (!client) {
       client = new AnnotateClient({
@@ -155,7 +156,7 @@ export default function (pi: ExtensionAPI) {
       ),
       browser: Type.Optional(
         Type.String({
-          description: "Browser profile name or id. Required when multiple profiles are connected unless PI_ANNOTATE_BROWSER is set.",
+          description: "Browser profile name, id, or surf:<label>. Defaults to PI_ANNOTATE_BROWSER, then BROWSER_PROFILE.",
         }),
       ),
     }),
@@ -206,7 +207,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet:
       "Use when the user explicitly asks to capture, save, or draft a local UI issue report from browser annotations.",
     parameters: Type.Object({
-      browser: Type.Optional(Type.String({ description: "Browser profile name or id." })),
+      browser: Type.Optional(Type.String({ description: "Browser profile name, id, or surf:<label>. Defaults to PI_ANNOTATE_BROWSER, then BROWSER_PROFILE." })),
       url: Type.Optional(Type.String({ description: "URL to annotate. Defaults to the active tab." })),
       title: Type.Optional(Type.String({ description: "Optional issue title." })),
       timeout: Type.Optional(Type.Number({ description: "Max seconds to wait. Default: 300." })),
