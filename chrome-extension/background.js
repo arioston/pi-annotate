@@ -116,9 +116,12 @@ function detectBrowserName() {
   return "Chrome/Chromium";
 }
 
+// Same label grammar as Surf targets and the Dalinar rendezvous contract.
+const PROFILE_LABEL_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+
 function getBrowserIdentity() {
   if (browserIdentityPromise) return browserIdentityPromise;
-  browserIdentityPromise = chrome.storage.local.get(["browserId", "browserName"]).then(async (stored) => {
+  browserIdentityPromise = chrome.storage.local.get(["browserId", "browserName", "profileLabel"]).then(async (stored) => {
     const id = typeof stored.browserId === "string" && stored.browserId
       ? stored.browserId
       : crypto.randomUUID();
@@ -126,7 +129,10 @@ function getBrowserIdentity() {
       ? stored.browserName.trim()
       : `${detectBrowserName()} ${id.slice(0, 6)}`;
     await chrome.storage.local.set({ browserId: id, browserName: name });
-    return { id, name, browser: detectBrowserName() };
+    const identity = { id, name, browser: detectBrowserName() };
+    // An absent or invalid label announces this profile unlabeled.
+    if (typeof stored.profileLabel === "string" && PROFILE_LABEL_PATTERN.test(stored.profileLabel)) identity.label = stored.profileLabel;
+    return identity;
   });
   return browserIdentityPromise;
 }
@@ -398,6 +404,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       browserIdentityPromise = Promise.resolve({ ...identity, name });
       await registerBrowser();
       sendResponse({ ...identity, name });
+    }).catch((err) => {
+      sendResponse({ error: err instanceof Error ? err.message : String(err) });
+    });
+    return true;
+  }
+
+  if (msg.type === "SET_PROFILE_LABEL") {
+    const label = typeof msg.label === "string" ? msg.label.trim() : "";
+    if (label && !PROFILE_LABEL_PATTERN.test(label)) {
+      sendResponse({ error: "Profile label must be lowercase letters, digits, or dashes, start with a letter, and be at most 32 characters" });
+      return;
+    }
+    getBrowserIdentity().then(async (identity) => {
+      const next = { ...identity };
+      if (label) {
+        await chrome.storage.local.set({ profileLabel: label });
+        next.label = label;
+      } else {
+        await chrome.storage.local.remove("profileLabel");
+        delete next.label;
+      }
+      browserIdentityPromise = Promise.resolve(next);
+      await registerBrowser();
+      sendResponse(next);
     }).catch((err) => {
       sendResponse({ error: err instanceof Error ? err.message : String(err) });
     });

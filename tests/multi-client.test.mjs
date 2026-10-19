@@ -39,11 +39,14 @@ async function waitFor(predicate, message) {
   throw new Error(typeof message === "function" ? await message() : message);
 }
 
-async function startHost({ registryDir, tmpdir }) {
+async function startHost({ registryDir, tmpdir, announceDir = path.join(tmpdir, "announce") }) {
+  // Every spawned host announces into a per-test directory, never into the
+  // operator's real rendezvous registry.
   const hostEnv = {
     ...process.env,
     TMPDIR: tmpdir,
     PI_ANNOTATE_REGISTRY_DIR: registryDir,
+    DALINAR_BROWSER_ANNOUNCE_DIR: announceDir,
   };
   delete hostEnv.NODE_TEST_CONTEXT;
   const host = spawn(process.execPath, ["chrome-extension/native/host.cjs"], {

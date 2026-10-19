@@ -79,11 +79,40 @@ document.getElementById('copy-cmd').addEventListener('click', (e) => {
   copyToClipboard(installCmd, e.target);
 });
 
+const profileLabelInput = document.getElementById('profile-label');
+
 chrome.runtime.sendMessage({ type: 'GET_BROWSER_IDENTITY' }).then((identity) => {
   if (identity?.name) {
     browserNameInput.value = identity.name;
     browserNameInput.title = `Connection id: ${identity.id}`;
   }
+  if (profileLabelInput) {
+    profileLabelInput.value = identity?.label || '';
+    if (identity?.id) profileLabelInput.title = `Announced as instance ${identity.id}`;
+  }
+});
+
+// Profile label (Dalinar plan 971): announced to the device rendezvous
+// registry so a workspace BROWSER_PROFILE can select this profile once the
+// operator approves the claim. Empty clears it (unlabeled).
+document.getElementById('save-profile-label')?.addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  const result = await chrome.runtime.sendMessage({
+    type: 'SET_PROFILE_LABEL',
+    label: profileLabelInput.value,
+  });
+  if (result?.error) {
+    setTrouble(result.error);
+    return;
+  }
+  profileLabelInput.value = result.label || '';
+  const original = button.textContent;
+  button.textContent = 'Saved!';
+  button.classList.add('copied');
+  setTimeout(() => {
+    button.textContent = original;
+    button.classList.remove('copied');
+  }, 1500);
 });
 
 document.getElementById('save-browser-name')?.addEventListener('click', async (event) => {

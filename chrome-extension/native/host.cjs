@@ -7,6 +7,7 @@ const crypto = require("crypto");
 const {
   resolveRuntimeDirectory,
 } = require("../../src/runtime-paths.cjs");
+const announce = require("../../src/announce.cjs");
 
 const INSTANCE_ID = crypto.randomBytes(12).toString("hex");
 let REGISTRY_PATHS;
@@ -94,6 +95,30 @@ function publishMetadata() {
   fs.renameSync(temporaryPath, METADATA_PATH);
 }
 
+// Device rendezvous (Dalinar plan 971): announce this profile on the
+// connect handshake so sessions can resolve surf:<label> through approved
+// claims. Announcing is best-effort and must never break native messaging.
+let announcedId = null;
+
+function announceBrowser(id, label, browser) {
+  try {
+    if (announcedId && announcedId !== id) announce.removeRecord(announcedId, process.pid);
+    const browserName = typeof browser === "string" && browser.trim() ? browser.trim().toLowerCase() : "chrome";
+    announce.writeRecord({
+      instanceId: id,
+      ...(label ? { label } : {}),
+      capability: "annotate",
+      browser: browserName,
+      pid: process.pid,
+      endpoint: { browserId: id },
+    });
+    announcedId = id;
+    log(`Announced instance ${id} (${label ? `label ${label}` : "unlabeled"})`);
+  } catch (err) {
+    log(`Announce failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function ensureToken() {
   try {
     const token = crypto.randomBytes(32).toString("hex");
@@ -171,12 +196,23 @@ function handleExtensionMessage(msg) {
     const browser = typeof msg.browser === "string" && msg.browser.trim()
       ? msg.browser.trim().slice(0, 80)
       : "Chrome/Chromium";
+    let label;
+    if (typeof msg.label === "string" && msg.label.trim()) {
+      if (announce.LABEL_PATTERN.test(msg.label.trim())) label = msg.label.trim();
+      else log("Ignoring invalid profile label; announcing unlabeled");
+    }
     browserMetadata = { id, name, browser };
     try {
       publishMetadata();
-      writeMessage({ type: "BROWSER_REGISTERED", id, name, browser });
     } catch (err) {
       log(`Failed to publish browser metadata: ${err.message}`);
+      return;
+    }
+    announceBrowser(id, label, browser);
+    try {
+      writeMessage({ type: "BROWSER_REGISTERED", id, name, browser, ...(label ? { label } : {}) });
+    } catch (err) {
+      log(`Failed to acknowledge browser registration: ${err.message}`);
     }
     return;
   }
@@ -236,6 +272,14 @@ function cleanup() {
     fs.unlinkSync(METADATA_PATH);
   } catch (err) {
     reportFsError(`Failed to remove metadata ${METADATA_PATH}`, err);
+  }
+
+  if (announcedId) {
+    try {
+      announce.removeRecord(announcedId, process.pid);
+    } catch (err) {
+      reportFsError(`Failed to remove announce record ${announcedId}`, err);
+    }
   }
 
   process.exit(0);
