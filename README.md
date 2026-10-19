@@ -331,28 +331,46 @@ MIT
 ## Shared Surf workspace profile
 
 Keep Surf and Pi Annotate, with both extensions and native hosts. Register each
-Surf profile with `surf-target add <label> --profile <selector>`. Open Pi Annotate
-in each profile and get its exact ID with `list_browsers`. Bind that ID with
-`surf-target annotate-bind work --browser-id example-work-id` (replace the
-example with the actual ID). Set `processEnv.BROWSER_PROFILE` to `work` in the
-workspace entry. Start a new client session and run
-`surf-target doctor --annotations`. Use `surf-target run --workspace -- surf tab.list`
-for Surf commands. Plain Surf keeps its existing default.
+Surf profile with `surf-target add <label> --profile <selector>`. In each
+profile, open the Pi Annotate popup and enter the same label in **Profile
+label** (for example `work`). On its next connect, the native host announces
+that profile to the device rendezvous registry (Dalinar plan 971). Run
+`surf-target claim list`. Approve each pending announcer once with
+`surf-target claim approve work --capability annotate --instance <id>`.
+Set `processEnv.BROWSER_PROFILE` to `work` in the workspace entry. Start a new
+client session and run `surf-target doctor --announce`. Use
+`surf-target run --workspace -- surf tab.list` for Surf commands. Plain Surf
+keeps its existing default.
 
 The annotation `browser` argument wins over a nonempty `PI_ANNOTATE_BROWSER`.
 Next, `BROWSER_PROFILE=work` selects `surf:work`. Without these values, existing
 browser discovery stays active. Pi and local MCP clients use the same resolver.
-Remove old overrides only by operator choice. Labels must exist in Surf's
-`targets.tsv`. Reserved `surf:` selectors require an exact live browser ID;
-names, account email, partial matches, and legacy endpoints are not fallbacks.
+Remove old overrides only by operator choice.
 
-The device-local file `annotate-bindings.json` sits beside `targets.tsv` in
-`SURF_TARGETS_CONFIG_DIR` or `~/.config/surf-targets`. Its format is
-`{"version":1,"bindings":{"work":"example-work-id"}}`. IDs must be unique.
-Use `--replace` to change a binding or `surf-target annotate-unbind work` to
-remove it. Do not sync this file. Rebind after extension storage resets. Binding
-changes take effect when a client next connects; active requests keep their
-current connection. Setup does not overwrite bindings or workspace settings.
+A `surf:<label>` selector resolves at connect time through `claims.json` and
+the live announce records. The claim for the label must name exactly one live
+announcer: a valid record with that label, a live host pid, and a browser ID
+that the native-host registry publishes exactly once. If no claim exists, if
+the announcer is not running, if two live profiles use the label, or if a
+different browser ID now uses the label, the request is refused with a
+named repair. It never selects a different profile. Names, account email,
+partial matches, and legacy endpoints are never fallbacks.
+
+Records live in `DALINAR_BROWSER_ANNOUNCE_DIR`, else
+`$XDG_RUNTIME_DIR/dalinar/browser-announce`, else
+`~/.cache/dalinar/browser-announce`. `claims.json` sits beside `targets.tsv`
+in `SURF_TARGETS_CONFIG_DIR` or `~/.config/surf-targets`. Its format is
+`{"version":1,"claims":{"work":{"annotate":"example-browser-id"}}}`. Do not
+sync either file. An extension storage reset gives the profile a new browser
+ID. Re-approve it with `surf-target claim approve work --capability annotate
+--instance <new-id> --replace`. An absent label announces the profile
+unlabeled; it is listed but never resolved. Setup does not write claims or
+workspace settings.
+
+Installs without `claims.json` keep reading the legacy
+`annotate-bindings.json` until the operator runs `surf-target claim import`.
+After `claims.json` exists, it is the only source; the bindings file is not
+read again.
 
 Install the updated Pi Annotate fork first, then the updated Dalinar setup.
 Set workspace `BROWSER_PROFILE` only after both updates. Older forks lack strict

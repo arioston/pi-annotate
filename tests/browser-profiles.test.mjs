@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { effectiveBrowserSelector, parseBindings, boundBrowserId } from "../src/browser-profiles.ts";
@@ -60,4 +60,33 @@ test("shared binding uses IDs across same-account and signed-out profiles, and r
     assert.equal(listBrowserTargets(dir).filter((target) => target.id === "exact-id").length, 1);
     assert.throws(() => resolveBrowserTarget("surf:work", dir), /ambiguous/);
   } finally { if (old === undefined) delete process.env.SURF_TARGETS_CONFIG_DIR; else process.env.SURF_TARGETS_CONFIG_DIR = old; }
+});
+
+test("claims resolution refuses malformed, dead, and duplicated announcers and skips unknown versions", async (t) => {
+  const { resolveSurfBrowserId } = await import("../src/browser-profiles.ts");
+  const root = mkdtempSync(join(tmpdir(), "claims-resolve-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const config = join(root, "config");
+  const announce = join(root, "announce");
+  mkdirSync(config, { mode: 0o700 });
+  mkdirSync(announce, { mode: 0o700 });
+  const env = { SURF_TARGETS_CONFIG_DIR: config, DALINAR_BROWSER_ANNOUNCE_DIR: announce };
+  writeFileSync(join(config, "claims.json"), JSON.stringify({ version: 1, claims: { work: { annotate: "claimed-id" } } }), { mode: 0o600 });
+  const record = (id, fields = {}) => writeFileSync(join(announce, `${id}.json`), JSON.stringify({ version: 1, instanceId: id, label: "work", capability: "annotate", browser: "chrome", pid: process.pid, endpoint: { browserId: id }, startedAt: "t", updatedAt: "t", ...fields }));
+
+  record("claimed-id");
+  assert.equal(resolveSurfBrowserId("surf:work", ["claimed-id", "other"], env), "claimed-id");
+  assert.throws(() => resolveSurfBrowserId("surf:work", ["claimed-id", "claimed-id"], env), /published by 2 native hosts/);
+  assert.throws(() => resolveSurfBrowserId("surf:work", [], env), /No live Pi Annotate announcer/);
+  record("claimed-id", { pid: 999999999 });
+  assert.throws(() => resolveSurfBrowserId("surf:work", ["claimed-id"], env), /No live Pi Annotate announcer/);
+  writeFileSync(join(announce, "claimed-id.json"), "{");
+  assert.throws(() => resolveSurfBrowserId("surf:work", ["claimed-id"], env), /claimed instance claimed-id is malformed/);
+  writeFileSync(join(announce, "claimed-id.json"), JSON.stringify({ version: 2, instanceId: "claimed-id", label: "work", capability: "annotate" }));
+  assert.throws(() => resolveSurfBrowserId("surf:work", ["claimed-id"], env), /No live Pi Annotate announcer/);
+  record("claimed-id", { capability: "surf", endpoint: { socketPath: "/x.sock" } });
+  assert.throws(() => resolveSurfBrowserId("surf:work", ["claimed-id"], env), /No live Pi Annotate announcer/);
+  writeFileSync(join(config, "claims.json"), JSON.stringify({ version: 1, claims: { work: { surf: "a", annotate: "a" } } }));
+  assert.throws(() => resolveSurfBrowserId("surf:work", ["claimed-id"], env), /Invalid or duplicate claim/);
+  assert.throws(() => resolveSurfBrowserId("surf:Work", ["claimed-id"], env), /Invalid Surf label/);
 });

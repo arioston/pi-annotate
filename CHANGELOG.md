@@ -5,6 +5,7 @@ All notable changes to Pi Annotate.
 ## [Unreleased]
 
 ### Added
+- **Device rendezvous announce** — The popup has a **Profile label** field kept in extension storage and sent in the `REGISTER_BROWSER` handshake. The native host writes an `annotate` announce record (Dalinar plan 971) on connect and removes it on disconnect when it can. `surf:<label>` resolves through `claims.json` and live announce records, and refuses a missing claim, a dead or ambiguous announcer, or a changed browser ID with a named repair. Installs without `claims.json` keep the legacy `annotate-bindings.json` lookup until `surf-target claim import`.
 - **Per-element reference images** — Note cards accept local PNG/JPEG/WebP references with thumbnails, removal controls, metadata stripping, and bounded client-side normalization; saved reports render current UI and reference images together
 - **Local issue reports** — `/issue` and `create_issue_report` persist annotations, comments, screenshots, structured JSON, and Markdown under a stable `PIA-…` reference without uploading or creating an external ticket
 - **Network context** — Issue annotation sessions capture up to 200 tab-scoped request URLs, methods, types, status/errors, cache state, and timings; sensitive query values are redacted and headers/cookies/bodies are excluded

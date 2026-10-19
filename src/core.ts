@@ -1,4 +1,4 @@
-import { effectiveBrowserSelector, boundBrowserId } from "./browser-profiles.js";
+import { effectiveBrowserSelector, resolveSurfBrowserId } from "./browser-profiles.js";
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -439,7 +439,7 @@ export function resolveBrowserTarget(
   const targets = inspection.kind === "targets" ? inspection.targets : [];
   if (wanted?.startsWith("surf:")) {
     if (inspection.kind === "registry-permission-denied") throw new ConnectionFailureError(discoveryToFailure(inspection));
-    const id = boundBrowserId(wanted);
+    const id = resolveSurfBrowserId(wanted, targets.map((item) => item.id));
     const matches = targets.filter((item) => item.id === id);
     if (matches.length > 1) throw new Error(`Bound browser ID "${id}" is ambiguous. Rebind a unique profile ID.`);
     const target = matches[0];

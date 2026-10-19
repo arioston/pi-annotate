@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { AnnotateClient, listBrowserTargets } from "../src/core.ts";
+import { AnnotateClient, listBrowserTargets, resolveBrowserTarget } from "../src/core.ts";
 
 function nativeFrame(message) {
   const body = Buffer.from(JSON.stringify(message));
@@ -287,4 +287,110 @@ test("Pi and MCP adapters use the same bound ID and preserve request ownership",
   assert.equal(piCode, 0, piError);
   const result = JSON.parse(piOutput.trim());
   assert.equal(result.details.success, true);
+});
+
+// --- Device rendezvous (Dalinar plan 971 step 3) ---------------------------
+
+async function rendezvousFixture(t) {
+  const registryDir = await mkdtemp(path.join(os.tmpdir(), ".pi-annotate-rv-registry-"));
+  const hostTmpdir = await mkdtemp(path.join(os.tmpdir(), ".pi-annotate-rv-host-"));
+  const configDir = await mkdtemp(path.join(os.tmpdir(), ".pi-annotate-rv-config-"));
+  const announceDir = path.join(hostTmpdir, "announce");
+  const hosts = [];
+  const previous = { SURF_TARGETS_CONFIG_DIR: process.env.SURF_TARGETS_CONFIG_DIR, DALINAR_BROWSER_ANNOUNCE_DIR: process.env.DALINAR_BROWSER_ANNOUNCE_DIR };
+  Object.assign(process.env, { SURF_TARGETS_CONFIG_DIR: configDir, DALINAR_BROWSER_ANNOUNCE_DIR: announceDir });
+  t.after(async () => {
+    for (const host of hosts) await stopProcess(host);
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    for (const dir of [registryDir, hostTmpdir, configDir]) await rm(dir, { recursive: true, force: true });
+  });
+  await writeFile(path.join(configDir, "targets.tsv"), "work\text-work\tdata\tprofile\t\textdir\npersonal\text-personal\tdata\tprofile2\t\textdir2\n");
+  const claim = (claims) => writeFile(path.join(configDir, "claims.json"), JSON.stringify({ version: 1, claims }), { mode: 0o600 });
+  const launch = async (id, label) => {
+    const started = await startHost({ registryDir, tmpdir: hostTmpdir, announceDir });
+    hosts.push(started.host);
+    started.host.stdin.write(nativeFrame({ type: "REGISTER_BROWSER", id, name: `Browser ${id}`, browser: "Google Chrome", ...(label ? { label } : {}) }));
+    const registered = await started.ready;
+    await waitFor(() => listBrowserTargets(registryDir).some((item) => item.id === id), `host for ${id} did not publish`);
+    return { ...started, registered };
+  };
+  return { registryDir, configDir, announceDir, claim, launch };
+}
+
+test("label handshake announces a record that surf: resolves end to end", async (t) => {
+  const { registryDir, configDir, announceDir, claim, launch } = await rendezvousFixture(t);
+  const browserId = `rv-${process.pid}-${Date.now()}`;
+  const { host, registered } = await launch(browserId, "work");
+  assert.equal(registered.label, "work");
+
+  const record = JSON.parse(await readFile(path.join(announceDir, `${browserId}.json`), "utf8"));
+  assert.deepEqual(
+    { version: record.version, instanceId: record.instanceId, label: record.label, capability: record.capability, browser: record.browser, pid: record.pid, endpoint: record.endpoint },
+    { version: 1, instanceId: browserId, label: "work", capability: "annotate", browser: "google chrome", pid: host.pid, endpoint: { browserId } },
+  );
+
+  // Before `claim import` (no claims.json) the legacy binding still decides,
+  // and an announcement alone never selects a profile.
+  await writeFile(path.join(configDir, "annotate-bindings.json"), JSON.stringify({ version: 1, bindings: { work: "legacy-other-id" } }));
+  assert.throws(() => resolveBrowserTarget("surf:work", registryDir), /Bound browser "legacy-other-id" for surf:work is disconnected/);
+  // Once claims.json exists it is authoritative: no claim refuses, and the
+  // legacy binding is never consulted again.
+  await claim({ personal: { annotate: "someone-else" } });
+  assert.throws(() => resolveBrowserTarget("surf:work", registryDir), /No annotate claim for Surf label "work"/);
+  await claim({ work: { annotate: browserId } });
+  assert.equal(resolveBrowserTarget("surf:work", registryDir).id, browserId);
+
+  const messages = [];
+  readNativeMessages(host.stdout, (message) => messages.push(message));
+  const client = new AnnotateClient({ browser: "surf:work", registryDir });
+  const resultPromise = client.annotate({ timeout: 3 });
+  const start = await waitFor(() => messages.find((message) => message.type === "START_ANNOTATION"), "surf:work did not reach the announced host");
+  host.stdin.write(nativeFrame({ type: "ANNOTATIONS_COMPLETE", requestId: start.requestId, result: { success: true, elements: [], url: "https://example.test", viewport: { width: 1, height: 1 } } }));
+  assert.equal((await resultPromise).success, true);
+
+  await stopProcess(host);
+  await assert.rejects(readFile(path.join(announceDir, `${browserId}.json`), "utf8"), { code: "ENOENT" }, "disconnect removes the host's own record");
+  assert.throws(() => resolveBrowserTarget("surf:work", registryDir), /No live Pi Annotate announcer for surf:work/);
+});
+
+test("an unlabeled handshake announces unlabeled and never resolves", async (t) => {
+  const { registryDir, announceDir, claim, launch } = await rendezvousFixture(t);
+  const browserId = `rv-unlabeled-${process.pid}-${Date.now()}`;
+  const { registered } = await launch(browserId, undefined);
+  assert.equal(registered.label, undefined);
+  const record = JSON.parse(await readFile(path.join(announceDir, `${browserId}.json`), "utf8"));
+  assert.equal(record.label, undefined);
+  await claim({ work: { annotate: browserId } });
+  assert.throws(() => resolveBrowserTarget("surf:work", registryDir), /No live Pi Annotate announcer/);
+});
+
+test("two live announcers on one label refuse instead of choosing", async (t) => {
+  const { registryDir, claim, launch } = await rendezvousFixture(t);
+  const first = `rv-first-${process.pid}-${Date.now()}`;
+  const second = `rv-second-${process.pid}-${Date.now()}`;
+  await launch(first, "work");
+  await launch(second, "work");
+  await claim({ work: { annotate: first } });
+  assert.throws(() => resolveBrowserTarget("surf:work", registryDir), /Ambiguous: 2 live Pi Annotate announcers use label "work"/);
+  // Explicit selectors keep their precedence and untouched behavior.
+  assert.equal(resolveBrowserTarget(second, registryDir).id, second);
+});
+
+test("a storage reset (new browser ID) gives the named re-approve refusal, never another profile", async (t) => {
+  const { registryDir, claim, launch } = await rendezvousFixture(t);
+  const original = `rv-original-${process.pid}-${Date.now()}`;
+  const other = `rv-other-${process.pid}-${Date.now()}`;
+  const { host } = await launch(original, "work");
+  await launch(other, "personal");
+  await claim({ work: { annotate: original }, personal: { annotate: other } });
+  assert.equal(resolveBrowserTarget("surf:work", registryDir).id, original);
+  await stopProcess(host);
+
+  const reset = `rv-reset-${process.pid}-${Date.now()}`;
+  await launch(reset, "work");
+  assert.throws(
+    () => resolveBrowserTarget("surf:work", registryDir),
+    new RegExp(`Live announcer ${reset} for surf:work is not the claimed instance ${original}.*surf-target claim approve work --capability annotate --instance ${reset} --replace`),
+  );
+  assert.equal(resolveBrowserTarget("surf:personal", registryDir).id, other);
 });
