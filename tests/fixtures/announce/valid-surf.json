@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "instanceId": "valid-surf",
+  "label": "work",
+  "capability": "surf",
+  "browser": "chrome",
+  "pid": 1,
+  "endpoint": { "socketPath": "/run/user/1000/surf-targets/work.sock" },
+  "startedAt": "2026-10-19T00:00:00.000Z",
+  "updatedAt": "2026-10-19T00:00:00.000Z"
+}

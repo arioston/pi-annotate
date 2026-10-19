@@ -1,0 +1,4 @@
+{
+  "version": 1,
+  "claims": { "work": { "playwright": "some-id" } }
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "instanceId": "valid-annotate",
+  "label": "work",
+  "capability": "annotate",
+  "browser": "chrome",
+  "pid": 1,
+  "endpoint": { "browserId": "example-annotate-browser-id" },
+  "startedAt": "2026-10-19T00:00:00.000Z",
+  "updatedAt": "2026-10-19T00:00:00.000Z"
+}

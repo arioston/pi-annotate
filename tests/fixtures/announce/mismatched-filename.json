@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "instanceId": "some-other-id",
+  "capability": "surf",
+  "browser": "chrome",
+  "pid": 1,
+  "endpoint": { "socketPath": "/run/user/1000/surf-targets/x.sock" },
+  "startedAt": "2026-10-19T00:00:00.000Z",
+  "updatedAt": "2026-10-19T00:00:00.000Z"
+}

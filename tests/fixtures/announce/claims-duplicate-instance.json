@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "claims": {
+    "work": { "surf": "same-id" },
+    "personal": { "surf": "same-id" }
+  }
+}

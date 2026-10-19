@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "claims": {
+    "work": { "surf": "example-surf-ext-id", "annotate": "example-annotate-browser-id" }
+  }
+}
