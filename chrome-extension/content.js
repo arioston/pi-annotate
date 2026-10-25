@@ -135,7 +135,11 @@
   // Ask the background for a screenshot of the visible tab. Resolves the
   // response object, or null when the extension context is gone.
   async function captureScreenshot() {
-    const sent = await PiSafeRuntime.sendMessageSafe({ type: "CAPTURE_SCREENSHOT" });
+    const sent = await PiSafeRuntime.sendMessageSafe({ type: "CAPTURE_SCREENSHOT", generation: sessionGeneration });
+    if (strictCapture) {
+      if (!sent.ok) throw new Error("The extension is not available. Reload the page and try again.");
+      if (sent.value?.error) throw new Error(sent.value.error);
+    }
     return sent.ok ? sent.value : null;
   }
 
@@ -220,6 +224,7 @@
   let highlightEl = null;
   let tooltipEl = null;
   let panelEl = null;
+  let panelHostEl = null;   // iframe panel host (plan 1055)
   let markersContainer = null;
   let styleEl = null;
 
@@ -1456,7 +1461,7 @@
       case "submit": handleSubmit(); return;
       case "cancel":
       case "close": handleCancel(); return;
-      case "prepareOutput": return; // wired with the non-destructive build (step 5)
+      case "prepareOutput": handlePrepareOutput(); return;
       default: return;
     }
     stateChanged();
@@ -2959,6 +2964,16 @@
     document.querySelectorAll("[data-pi-changed]").forEach(el => el.removeAttribute("data-pi-changed"));
   }
 
+  // <etch-pause-helpers>
+  const ETCH_OBSERVER_OPTIONS = {
+    attributes: true,
+    attributeOldValue: true,
+    characterData: true,
+    characterDataOldValue: true,
+    childList: true,
+    subtree: true,
+  };
+
   function startEtchCapture() {
     clearEtchMarkers();
     etchMode = true;
@@ -2978,14 +2993,7 @@
       updateEtchCounter();
     });
 
-    etchObserver.observe(document.documentElement, {
-      attributes: true,
-      attributeOldValue: true,
-      characterData: true,
-      characterDataOldValue: true,
-      childList: true,
-      subtree: true,
-    });
+    etchObserver.observe(document.documentElement, ETCH_OBSERVER_OPTIONS);
   }
 
   function stopEtchCapture() {
@@ -2998,6 +3006,24 @@
     etchMode = false;
     updateEtchCounter();
   }
+
+  // Pause for a non-final build: process the pending records once and
+  // disconnect, but keep every baseline, the start time and the change count.
+  // Returns true when there was an observer to pause.
+  function pauseEtchCapture() {
+    if (!etchObserver) return false;
+    const pending = etchObserver.takeRecords();
+    etchObserver.disconnect();
+    if (pending.length) processEtchMutations(pending);
+    return true;
+  }
+
+  // Reconnect the same observer with the same options. It clears nothing.
+  function resumeEtchCapture() {
+    if (!etchObserver) return;
+    etchObserver.observe(document.documentElement, ETCH_OBSERVER_OPTIONS);
+  }
+  // </etch-pause-helpers>
 
   function updateEtchCounter() {
     if (etchChangeCount !== lastEtchCountSeen) {
@@ -3485,6 +3511,13 @@
       try {
         const ruleTexts = rulesByNode.get(sheet.ownerNode);
 
+        // Nothing to restore when the sheet already holds the snapshot. This
+        // also keeps a sheet with rules that insertRule rejects unchanged.
+        if (sheet.cssRules.length === ruleTexts.length
+          && ruleTexts.every((text, i) => sheet.cssRules[i].cssText === text)) {
+          continue;
+        }
+
         // Clear current rules
         while (sheet.cssRules.length > 0) {
           sheet.deleteRule(0);
@@ -3632,7 +3665,21 @@
   // Submit / Cancel
   // ─────────────────────────────────────────────────────────────────────
   
-  async function handleSubmit() {
+  // True while a non-final build (Prepare output) runs: a refused capture
+  // then fails the build instead of leaving the image out.
+  let strictCapture = false;
+  let preparing = false;
+
+  /**
+   * Build the result that Submit sends. With final: true this is exactly the
+   * old Submit path (it ends Etch). With final: false (Prepare output) it must
+   * leave the session as it found it: Etch keeps recording, change marks come
+   * back, and the hidden UI is shown again.
+   */
+  async function buildResult({ final }) {
+    // Read the revision first. Hiding and showing the UI, the debug re-capture
+    // and the capture itself do not change it.
+    const preparedRevision = stateRevision;
     const context = contextText.trim();
     
     // Re-capture debug data for all elements if debug mode is on at submit time
@@ -3657,108 +3704,177 @@
         ...(attachments.length ? { attachments } : {}),
       };
     });
-    
-    // Hide UI for screenshot capture
-    hideHighlight();
-    hideTooltip();
-    if (markersContainer) markersContainer.style.display = "none";
-    if (notesContainer) notesContainer.style.display = "none";
-    if (connectorsEl) connectorsEl.style.display = "none";
-    if (panelEl) panelEl.style.display = "none";
-    clearEtchMarkers();
-    
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-    
-    let screenshot = null;
-    let screenshots = [];
-    
-    if (screenshotMode !== "none") {
-      try {
-        const resp = await captureScreenshot();
-        if (resp?.dataUrl) {
-          const fullScreenshot = resp.dataUrl;
-          
-          if (screenshotMode === "full") {
-            // Add numbered badges to the full screenshot so elements can be identified
-            screenshot = await addBadgesToScreenshot(fullScreenshot, selectedElements);
-          } else {
-            for (let i = 0; i < selectedElements.length; i++) {
-              const hasScreenshot = elementScreenshots.get(i) !== false;
-              const element = selectedElements[i].element;
-              if (hasScreenshot && element && document.contains(element)) {
-                const cropped = await cropToElement(fullScreenshot, element);
-                screenshots.push({ index: i + 1, dataUrl: cropped });
+
+    const hideable = [highlightEl, tooltipEl, markersContainer, notesContainer, connectorsEl, panelEl, panelHostEl];
+    const savedDisplay = hideable.map((el) => (el ? el.style.display : null));
+    const changedMarks = final ? [] : Array.from(document.querySelectorAll("[data-pi-changed]"));
+    let paused = false;
+    strictCapture = !final;
+
+    try {
+      // Hide UI for screenshot capture
+      hideHighlight();
+      hideTooltip();
+      if (markersContainer) markersContainer.style.display = "none";
+      if (notesContainer) notesContainer.style.display = "none";
+      if (connectorsEl) connectorsEl.style.display = "none";
+      if (panelEl) panelEl.style.display = "none";
+      if (panelHostEl) panelHostEl.style.display = "none";
+      clearEtchMarkers();
+      
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      
+      let screenshot = null;
+      let screenshots = [];
+      
+      if (screenshotMode !== "none") {
+        try {
+          const resp = await captureScreenshot();
+          if (resp?.dataUrl) {
+            const fullScreenshot = resp.dataUrl;
+            
+            if (screenshotMode === "full") {
+              // Add numbered badges to the full screenshot so elements can be identified
+              screenshot = await addBadgesToScreenshot(fullScreenshot, selectedElements);
+            } else {
+              for (let i = 0; i < selectedElements.length; i++) {
+                const hasScreenshot = elementScreenshots.get(i) !== false;
+                const element = selectedElements[i].element;
+                if (hasScreenshot && element && document.contains(element)) {
+                  const cropped = await cropToElement(fullScreenshot, element);
+                  screenshots.push({ index: i + 1, dataUrl: cropped });
+                }
               }
             }
           }
+        } catch (err) {
+          if (!final) throw err;
+          console.error("[pi-annotate] Screenshot failed:", err);
         }
-      } catch (err) {
-        console.error("[pi-annotate] Screenshot failed:", err);
+      }
+
+      // Edit capture
+      let editCapture = null;
+      if (etchStartTime) {
+        // Stop (Submit) or pause (Prepare) the observer first. This must happen
+        // regardless of errors below.
+        if (final) stopEtchCapture();
+        else paused = pauseEtchCapture();
+
+        try {
+          const inlineStyles = diffInlineStyles();
+          const currentRulesSnapshot = serializeAllStylesheets();
+          const rules = etchInitialRules ? diffStylesheetRules(etchInitialRules, currentRulesSnapshot) : [];
+          const dom = compileDOMChanges();
+          const changeCount = inlineStyles.length + rules.length + dom.length;
+          const warnings = [];
+
+          if (etchInitialRules?.crossOriginCount > 0) {
+            warnings.push(`${etchInitialRules.crossOriginCount} cross-origin stylesheet(s) could not be tracked`);
+          }
+          if (etchInitialRules?.skippedLargeCount > 0) {
+            warnings.push(`${etchInitialRules.skippedLargeCount} large stylesheet(s) not rule-diffed`);
+          }
+
+          let beforeScreenshot = null;
+          let afterScreenshot = null;
+
+          if (changeCount > 0) {
+            // UI is already hidden from the annotation screenshot step above
+            const shots = await captureBeforeAfterScreenshots();
+            beforeScreenshot = shots.beforeScreenshot;
+            afterScreenshot = shots.afterScreenshot;
+          }
+
+          editCapture = {
+            inlineStyles,
+            rules,
+            dom,
+            beforeScreenshot,
+            afterScreenshot,
+            duration: Date.now() - etchStartTime,
+            changeCount,
+            warnings: warnings.length > 0 ? warnings : undefined,
+          };
+        } catch (err) {
+          if (!final) throw err;
+          console.error("[pi-annotate] Edit capture failed:", err);
+        }
+      }
+
+      return {
+        preparedRevision,
+        result: {
+          success: true,
+          elements,
+          screenshot,
+          screenshots,
+          prompt: context,
+          url: window.location.href,
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+          editCapture,
+        },
+      };
+    } finally {
+      strictCapture = false;
+      if (!final && isActive) {
+        // Put everything back as it was before the build. The change marks and
+        // the UI come back first; then Etch records again.
+        for (const el of changedMarks) {
+          if (document.contains(el) && !el.hasAttribute("data-pi-changed")) el.setAttribute("data-pi-changed", "");
+        }
+        hideable.forEach((el, i) => {
+          if (el && savedDisplay[i] !== null) el.style.display = savedDisplay[i];
+        });
+        if (paused) resumeEtchCapture();
+        updateEtchCounter();
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
       }
     }
+  }
 
-    // Edit capture
-    let editCapture = null;
-    if (etchStartTime) {
-      // Disconnect observer first — must happen regardless of errors below
-      stopEtchCapture();
-
-      try {
-        const inlineStyles = diffInlineStyles();
-        const currentRulesSnapshot = serializeAllStylesheets();
-        const rules = etchInitialRules ? diffStylesheetRules(etchInitialRules, currentRulesSnapshot) : [];
-        const dom = compileDOMChanges();
-        const changeCount = inlineStyles.length + rules.length + dom.length;
-        const warnings = [];
-
-        if (etchInitialRules?.crossOriginCount > 0) {
-          warnings.push(`${etchInitialRules.crossOriginCount} cross-origin stylesheet(s) could not be tracked`);
-        }
-        if (etchInitialRules?.skippedLargeCount > 0) {
-          warnings.push(`${etchInitialRules.skippedLargeCount} large stylesheet(s) not rule-diffed`);
-        }
-
-        let beforeScreenshot = null;
-        let afterScreenshot = null;
-
-        if (changeCount > 0) {
-          // UI is already hidden from the annotation screenshot step above
-          const shots = await captureBeforeAfterScreenshots();
-          beforeScreenshot = shots.beforeScreenshot;
-          afterScreenshot = shots.afterScreenshot;
-        }
-
-        editCapture = {
-          inlineStyles,
-          rules,
-          dom,
-          beforeScreenshot,
-          afterScreenshot,
-          duration: Date.now() - etchStartTime,
-          changeCount,
-          warnings: warnings.length > 0 ? warnings : undefined,
-        };
-      } catch (err) {
-        console.error("[pi-annotate] Edit capture failed:", err);
-      }
-    }
-    
+  async function handleSubmit() {
+    const { result } = await buildResult({ final: true });
     PiSafeRuntime.sendMessageSafe({
       type: "ANNOTATIONS_COMPLETE",
+      generation: sessionGeneration,
       requestId,
-      result: {
-        success: true,
-        elements,
-        screenshot,
-        screenshots,
-        prompt: context,
-        url: window.location.href,
-        viewport: { width: window.innerWidth, height: window.innerHeight },
-        editCapture,
-      },
+      result,
     });
     
     deactivate();
+  }
+
+  // Prepare output: build the result without ending the session, then hand it
+  // to the background, which asks the native host to format it for copying.
+  async function handlePrepareOutput() {
+    if (preparing || !isActive) return;
+    preparing = true;
+    const generation = sessionGeneration;
+    try {
+      const { preparedRevision, result } = await buildResult({ final: false });
+      if (!isActive || generation !== sessionGeneration) return;
+      preparedInfo = { preparedId: `g${generation}r${preparedRevision}`, revision: preparedRevision };
+      await PiSafeRuntime.sendMessageSafe({
+        type: PiPanelProtocol.TYPES.PREPARED_RESULT,
+        generation,
+        revision: preparedRevision,
+        result,
+      });
+    } catch (err) {
+      console.error("[pi-annotate] Prepare output failed:", err);
+      if (isActive && generation === sessionGeneration) {
+        await PiSafeRuntime.sendMessageSafe({
+          type: PiPanelProtocol.TYPES.PREPARED_RESULT,
+          generation,
+          revision: stateRevision,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } finally {
+      preparing = false;
+      publishState();
+    }
   }
   
   function handleCancel() {
