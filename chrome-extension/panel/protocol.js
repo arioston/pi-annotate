@@ -29,6 +29,8 @@
     // background -> content
     VIEW_BOUND: "VIEW_BOUND",
     VIEW_UNBOUND: "VIEW_UNBOUND",
+    // background -> view (port reply to an accepted hello)
+    HELLO_ACK: "HELLO_ACK",
     // page window messages between content.js and the frame
     PI_FRAME_TOKEN: "PI_FRAME_TOKEN",
     PI_FRAME_UNBOUND: "PI_FRAME_UNBOUND",
