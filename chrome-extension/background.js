@@ -222,7 +222,7 @@ async function sendToContentScript(tabId, msg) {
     try {
       await chrome.scripting.executeScript({
         target: { tabId },
-        files: ["content.js"],
+        files: chrome.runtime.getManifest().content_scripts[0].js,
       });
       await new Promise(r => setTimeout(r, 100));
       await chrome.tabs.sendMessage(tabId, msg);

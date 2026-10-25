@@ -132,6 +132,13 @@
     });
   }
   
+  // Ask the background for a screenshot of the visible tab. Resolves the
+  // response object, or null when the extension context is gone.
+  async function captureScreenshot() {
+    const sent = await PiSafeRuntime.sendMessageSafe({ type: "CAPTURE_SCREENSHOT" });
+    return sent.ok ? sent.value : null;
+  }
+
   // Check if element is part of pi-annotate UI (by id or class)
   function isPiElement(el) {
     if (!el) return false;
@@ -3181,7 +3188,7 @@
   async function captureBeforeAfterScreenshots() {
     clearEtchMarkers();
 
-    const afterResp = await chrome.runtime.sendMessage({ type: "CAPTURE_SCREENSHOT" });
+    const afterResp = await captureScreenshot();
     const afterScreenshot = afterResp?.dataUrl || null;
 
     // Record final values for redo
@@ -3221,7 +3228,7 @@
       await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
 
       // Capture "before" screenshot (page in original visual state)
-      const beforeResp = await chrome.runtime.sendMessage({ type: "CAPTURE_SCREENSHOT" });
+      const beforeResp = await captureScreenshot();
       beforeScreenshot = beforeResp?.dataUrl || null;
     } finally {
       // REDO: always restore modified visual state, even if before screenshot failed.
@@ -3454,7 +3461,7 @@
     
     if (screenshotMode !== "none") {
       try {
-        const resp = await chrome.runtime.sendMessage({ type: "CAPTURE_SCREENSHOT" });
+        const resp = await captureScreenshot();
         if (resp?.dataUrl) {
           const fullScreenshot = resp.dataUrl;
           
@@ -3523,7 +3530,7 @@
       }
     }
     
-    chrome.runtime.sendMessage({
+    PiSafeRuntime.sendMessageSafe({
       type: "ANNOTATIONS_COMPLETE",
       requestId,
       result: {
@@ -3545,15 +3552,13 @@
     const id = requestId;
     deactivate();
     
-    try {
-      chrome.runtime.sendMessage({
-        type: "CANCEL",
-        requestId: id,
-        reason: "user",
-      });
-    } catch (e) {
-      console.log("[pi-annotate] Could not send cancel (no connection)");
-    }
+    PiSafeRuntime.sendMessageSafe({
+      type: "CANCEL",
+      requestId: id,
+      reason: "user",
+    }).then((sent) => {
+      if (!sent.ok) console.log("[pi-annotate] Could not send cancel (no connection)");
+    });
   }
   
   console.log("[pi-annotate] Content script ready (v0.4.0)");
