@@ -391,7 +391,7 @@
         if (getPort() === p) setPort(null);
         // A service-worker restart drops the port. Connect again.
         clearTimeout(retryTimer);
-        retryTimer = setTimeout(connect, 1000);
+        retryTimer = setTimeout(function () { if (!getPort()) connect(); }, 1000);
       });
       p.postMessage({ type: P.TYPES.PANE_HELLO, tabId: root.chrome.devtools.inspectedWindow.tabId });
     }

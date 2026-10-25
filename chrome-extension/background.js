@@ -5,6 +5,9 @@
  * the native host (Pi) and content scripts.
  */
 
+// Panel routing (plan 1055): the protocol and the pure routing logic.
+importScripts("lib/routing.js", "panel/protocol.js");
+
 let nativePort = null;
 let pendingPing = null;
 let lastNativeDisconnectError = "";
@@ -142,6 +145,61 @@ async function registerBrowser(port = nativePort) {
   if (!port || nativePort !== port) return identity;
   port.postMessage({ type: "REGISTER_BROWSER", ...identity });
   return identity;
+}
+
+function randomHex(bytes) {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// All bindings live in memory. A service-worker restart drops them; views
+// connect again and the content script rebuilds its record (see routing.js).
+const router = PiRouting.createRouter({
+  panelUrl: chrome.runtime.getURL("panel/panel.html"),
+  randomHex,
+  postToPort: (port, msg) => {
+    try { port.postMessage(msg); } catch (err) { /* the view is gone */ }
+  },
+  closePort: (port) => {
+    try { port.disconnect(); } catch (err) { /* already closed */ }
+  },
+  sendToTab: (tabId, msg, target) => chrome.tabs.sendMessage(tabId, msg, target).catch(() => {}),
+  sendToNative: (msg) => {
+    sendToNative(msg);
+    return !!nativePort;
+  },
+  nativeConnected: () => !!nativePort,
+});
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "pi-pane" && port.name !== "pi-frame") return;
+  port.onMessage.addListener((msg) => router.onPortMessage(port, msg));
+  port.onDisconnect.addListener(() => router.onPortDisconnect(port));
+});
+
+// Where a native request goes: the request's own tab, the last focused
+// DevTools pane tab, else the active tab of the last focused normal window.
+async function resolveTargetTab(requestId) {
+  const choice = PiRouting.selectTargetTab({
+    requestBoundTabId: requestId && requestTabs.has(requestId) ? requestTabs.get(requestId) : null,
+    lastFocusedPaneTab: router.lastFocusedPaneTab(),
+    isPaneBound: router.isPaneBound,
+  });
+  if (choice.source !== "window") {
+    try {
+      const tab = await chrome.tabs.get(choice.tabId);
+      if (tab?.id) return tab;
+    } catch (err) {
+      // The tab is gone. Use the focused window.
+    }
+  }
+  try {
+    const win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+    if (!win?.id) return null;
+    const [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
+    return tab || null;
+  } catch (err) {
+    return null;
+  }
 }
 
 function getRequestId(msg) {
@@ -284,6 +342,15 @@ function connectNative() {
   nativePort = port;
 
   port.onMessage.addListener((msg) => {
+    // A host that lists "format-result" can format a prepared result.
+    router.onNativeMessage(msg);
+
+    // Answer to FORMAT_RESULT. It never starts an annotation or a tab query.
+    if (msg?.type === "FORMATTED_RESULT") {
+      router.onFormattedResult(msg);
+      return;
+    }
+
     if (msg?.type === "PONG") {
       lastNativeDisconnectError = "";
       resolvePendingPing({ connected: true });
@@ -297,8 +364,8 @@ function connectNative() {
 
     console.log("[pi-annotate] From native host:", msg);
 
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (!tabs[0]?.id) {
+    resolveTargetTab(getRequestId(msg)).then((targetTab) => {
+      if (!targetTab?.id) {
         console.log("[pi-annotate] No active tab found");
         const requestId = getRequestId(msg);
         if (requestId) {
@@ -308,8 +375,8 @@ function connectNative() {
       }
 
       const requestId = getRequestId(msg);
-      const tabId = requestId && requestTabs.has(requestId) ? requestTabs.get(requestId) : tabs[0].id;
-      const currentUrl = tabs[0].url;
+      const tabId = requestId && requestTabs.has(requestId) ? requestTabs.get(requestId) : targetTab.id;
+      const currentUrl = targetTab.url;
 
       if (msg.type === "START_ANNOTATION") {
         const restricted = isRestrictedUrl(currentUrl);
@@ -367,6 +434,7 @@ function connectNative() {
     resolvePendingPing({ connected: false, error });
     if (nativePort === port) {
       nativePort = null;
+      router.onNativeDisconnect();
     }
     setTimeout(connectNative, 2000);
   });
@@ -436,20 +504,58 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   const requestId = getRequestId(msg);
 
+  if (msg.type === PiPanelProtocol.TYPES.PANEL_SESSION) {
+    router.registerSession(sender, msg.generation);
+    return;
+  }
+
+  if (msg.type === PiPanelProtocol.TYPES.PANEL_SESSION_END) {
+    router.endSession(sender, msg.generation);
+    return;
+  }
+
+  if (msg.type === PiPanelProtocol.TYPES.FRAME_TOKEN_REQUEST) {
+    const issued = router.requestFrameToken(sender, msg.generation);
+    sendResponse(issued.ok ? { token: issued.token } : { error: issued.reason });
+    return;
+  }
+
+  if (msg.type === PiPanelProtocol.TYPES.STATE) {
+    router.relayState(sender, msg);
+    return;
+  }
+
+  if (msg.type === PiPanelProtocol.TYPES.PREPARED_RESULT) {
+    router.onPreparedResult(sender, msg);
+    return;
+  }
+
   if (msg.type === "CAPTURE_SCREENSHOT") {
     if (!sender.tab?.windowId) {
       console.log("[pi-annotate] Screenshot failed: No window ID");
       sendResponse({ error: "No window ID" });
       return true;
     }
-    chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: "png" }, (dataUrl) => {
-      if (chrome.runtime.lastError) {
-        console.log("[pi-annotate] Screenshot error:", chrome.runtime.lastError.message);
-        sendResponse({ error: chrome.runtime.lastError.message });
-      } else {
-        console.log("[pi-annotate] Screenshot captured, size:", dataUrl?.length || 0);
-        sendResponse({ dataUrl });
-      }
+    // captureVisibleTab(windowId) captures the active tab of that window, which
+    // is not always the annotated tab. The router checks before and after.
+    router.guardedCapture(sender, msg.generation, {
+      getActiveTabId: async (windowId) => {
+        const [tab] = await chrome.tabs.query({ active: true, windowId });
+        return tab?.id ?? null;
+      },
+      capture: (windowId) => new Promise((resolve) => {
+        chrome.tabs.captureVisibleTab(windowId, { format: "png" }, (dataUrl) => {
+          if (chrome.runtime.lastError) {
+            console.log("[pi-annotate] Screenshot error:", chrome.runtime.lastError.message);
+            resolve({ error: chrome.runtime.lastError.message });
+          } else {
+            console.log("[pi-annotate] Screenshot captured, size:", dataUrl?.length || 0);
+            resolve({ dataUrl });
+          }
+        });
+      }),
+    }).then(sendResponse, (err) => {
+      sendResponse({ error: err instanceof Error ? err.message : String(err) });
     });
     return true;
   }
@@ -461,14 +567,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (network) msg.result.network = network;
     }
     console.log("[pi-annotate] Forwarding to native host:", msg.type);
-    sendToNative(msg);
+    // The session generation is for the capture guard; the host and the agent never see it.
+    sendToNative(PiRouting.toNativeCompletion(msg));
   }
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   for (const [requestId, session] of networkSessions) {
     if (session.tabId === tabId) networkSessions.delete(requestId);
   }
+  router.noteTabEvent({ kind: "removed", tabId, windowId: removeInfo?.windowId, isWindowClosing: !!removeInfo?.isWindowClosing });
+  router.onTabRemoved(tabId);
+});
+
+// Panel bindings end when the document changes.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  router.noteTabEvent({ kind: "updated", tabId, changeInfo });
+  if (changeInfo.status === "loading") router.onTabLoading(tabId);
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  router.noteTabEvent({ kind: "activated", tabId: activeInfo.tabId, windowId: activeInfo.windowId });
 });
 
 // Handle keyboard shortcut

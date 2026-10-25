@@ -20,6 +20,7 @@
     ACTION: "ACTION",
     // content -> background
     PANEL_SESSION: "PANEL_SESSION",
+    PANEL_SESSION_END: "PANEL_SESSION_END",
     FRAME_TOKEN_REQUEST: "FRAME_TOKEN_REQUEST",
     PREPARED_RESULT: "PREPARED_RESULT",
     // view -> background (ports)
