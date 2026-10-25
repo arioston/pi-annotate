@@ -992,11 +992,13 @@
       console.log("[pi-annotate] Restarting session (new request)");
       resetState();
       sessionGeneration++;
+      announceSession();
       stateChanged();
       return;
     }
     isActive = true;
     sessionGeneration++;
+    announceSession();
     contextText = "";
     notesVisible = true;
     preparedInfo = null;
@@ -1110,9 +1112,18 @@
     console.log("[pi-annotate] State reset for new session");
   }
   
+  // Tell the background a session started or ended. The background keeps one
+  // record for each tab (document and generation); the capture guard and the
+  // panel relay read it. A lost record is rebuilt from the next message that
+  // carries the generation.
+  function announceSession() {
+    PiSafeRuntime.sendMessageSafe({ type: PiPanelProtocol.TYPES.PANEL_SESSION, generation: sessionGeneration });
+  }
+
   function deactivate() {
     if (!isActive) return;
     isActive = false;
+    PiSafeRuntime.sendMessageSafe({ type: PiPanelProtocol.TYPES.PANEL_SESSION_END, generation: sessionGeneration });
     interactMode = false;
     
     document.removeEventListener("mousemove", onMouseMove, true);
