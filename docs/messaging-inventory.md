@@ -13,10 +13,15 @@ the extension context is invalid (after an extension reload).
 | `captureScreenshot()` (used by the annotation, before and after capture) | `PiSafeRuntime.sendMessageSafe({ type: "CAPTURE_SCREENSHOT" })` | guarded |
 | `handleSubmit()` end | `PiSafeRuntime.sendMessageSafe({ type: "ANNOTATIONS_COMPLETE" })` | guarded |
 | `handleCancel()` | `PiSafeRuntime.sendMessageSafe({ type: "CANCEL" })` | guarded |
+| `publishState()` | `PiSafeRuntime.sendMessageSafe({ type: "STATE" })` | guarded |
+| `announceSession()` and `deactivate()` | `PiSafeRuntime.sendMessageSafe({ type: "PANEL_SESSION" })` and `PANEL_SESSION_END` | guarded |
+| `postFrameToken()` | `PiSafeRuntime.sendMessageSafe({ type: "FRAME_TOKEN_REQUEST" })` | guarded |
+| `handlePrepareOutput()` | `PiSafeRuntime.sendMessageSafe({ type: "PREPARED_RESULT" })` | guarded |
+| `createPanelFrame()` | `chrome.runtime.getURL` (page-side, no message) | guarded (returns a string; a throw falls back to the in-page panel) |
 
-Before plan 1055 the five `chrome.runtime.sendMessage` calls were not guarded
-(three captures, one complete) or partly guarded (the cancel call sat in a
-`try` block that cannot catch a rejected promise).
+Before plan 1055 the five `chrome.runtime.sendMessage` calls had no
+protection (three captures, one complete) or partial protection (the cancel
+call sat in a `try` block that cannot catch a rejected promise).
 
 ## background.js
 
@@ -27,7 +32,17 @@ Before plan 1055 the five `chrome.runtime.sendMessage` calls were not guarded
 | `chrome.runtime.onMessage` listener | not a send; responses use `sendResponse` |
 | `chrome.scripting.executeScript` | guarded (`try`/`catch`) |
 
-The service worker is not subject to context invalidation.
+The service worker is not subject to context invalidation. New in plan 1055:
+`chrome.runtime.onConnect` ports (`pi-pane`, `pi-frame`), `port.postMessage`
+and `chrome.tabs.sendMessage` with a `documentId` or `frameId` target; every
+send is wrapped so a closed port or a missing document is ignored.
+
+## panel/panel.js (new in plan 1055)
+
+| Call | Status |
+|---|---|
+| `chrome.runtime.connect` (`pi-pane`, `pi-frame`) and `port.postMessage` | guarded (a closed port is ignored; the pane connects again, the frame asks for a new token) |
+| `chrome.devtools.inspectedWindow.eval` | guarded (the callback reports an exception) |
 
 ## popup.js (not edited by this plan)
 
