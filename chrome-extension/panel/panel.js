@@ -341,12 +341,13 @@
     return {
       handleMessage: handleMessage,
       setStatus: setStatus,
+      sendAction: sendAction,
       get state() { return state; },
       get prepared() { return prepared; },
     };
   }
 
-  root.PiPanelView = { createView: createView };
+  root.PiPanelView = { createView: createView, bootFrame: bootFrame };
 
   // ── boot (extension page only) ────────────────────────────────────────
   function boot() {
@@ -448,6 +449,25 @@
         }
       });
       p.postMessage({ type: P.TYPES.FRAME_HELLO, token: token });
+    }
+
+    // Drag the frame host by its header (the host moves; this page does not).
+    var header = root.document.querySelector(".pi-header");
+    var dragging = false;
+    if (header) {
+      header.addEventListener("mousedown", function (e) {
+        if (e.target && e.target.tagName === "BUTTON") return;
+        dragging = true;
+        e.preventDefault();
+      });
+      root.addEventListener("mouseup", function () { dragging = false; });
+      root.addEventListener("mousemove", function (e) {
+        if (!dragging) return;
+        if (e.buttons !== 1) { dragging = false; return; }
+        var dx = Math.max(-P.MAX_DRAG, Math.min(P.MAX_DRAG, e.movementX || 0));
+        var dy = Math.max(-P.MAX_DRAG, Math.min(P.MAX_DRAG, e.movementY || 0));
+        if (dx !== 0 || dy !== 0) view.sendAction("dragBy", { dx: dx, dy: dy });
+      });
     }
 
     // Page scripts share window.parent with the content script, so event.source

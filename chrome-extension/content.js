@@ -185,6 +185,10 @@
   let contextText = "";          // the general context, owned here, not by the input
   let notesVisible = true;
   let preparedInfo = null;       // { preparedId, revision } of the last Prepare output
+  let boundView = null;          // null | "pane" | "frame": set by VIEW_BOUND / VIEW_UNBOUND
+  let panelMode = "light";       // "light" | "frame-pending" | "frame" | "pane"
+  let frameTimer = null;
+  let panelFrameEl = null;
   let statePublishQueued = false;
   let lastEtchCountSeen = 0;
   
@@ -248,7 +252,7 @@
   /** True when the event started inside pi-annotate's own chrome. */
   function fromPiSurface(target) {
     if (!target || typeof target.closest !== "function") return false;
-    return !!(target.closest("#pi-panel") || target.closest(".pi-note-card") || target.closest("#pi-tailedit-root"));
+    return !!(target.closest("#pi-panel") || target.closest("#pi-panel-host") || target.closest(".pi-note-card") || target.closest("#pi-tailedit-root"));
   }
 
   /**
@@ -685,6 +689,24 @@
     }
     
     #pi-panel * { box-sizing: border-box; }
+
+    /* Iframe fallback host (plan 1055): the same panel page in an extension frame. */
+    #pi-panel-host {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      height: min(320px, 60vh);
+      z-index: ${Z_INDEX_PANEL};
+      box-shadow: 0 -4px 24px var(--pi-shadow);
+      border-top: 1px solid var(--pi-border-muted);
+      background: var(--pi-bg-card);
+    }
+    #pi-panel-host iframe {
+      display: block;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: var(--pi-bg-card);
+    }
     
     /* Interact mode: the panel stays usable but visibly steps back, so it is
        obvious why clicking the page no longer selects anything. */
@@ -951,6 +973,8 @@
       } else {
         activate();
       }
+    } else if (msg.type === PiPanelProtocol.TYPES.VIEW_BOUND || msg.type === PiPanelProtocol.TYPES.VIEW_UNBOUND) {
+      if (sender.id === chrome.runtime.id && !sender.tab) onViewBinding(msg.type, msg.kind);
     } else if (msg.type === PiPanelProtocol.TYPES.ACTION) {
       // Only the background relays a view's action to this script.
       if (sender.id === chrome.runtime.id && !sender.tab) handlePanelAction(msg);
@@ -1016,6 +1040,7 @@
     createMarkers();
     createNotesContainer();
     createPanel();
+    startPanelView();
     
     // Add listeners
     document.addEventListener("mousemove", onMouseMove, true);
@@ -1145,6 +1170,10 @@
     styleEl?.remove();
     highlightEl?.remove();
     tooltipEl?.remove();
+    removePanelFrame();
+    panelMode = "light";
+    // The iframe view ends with the session; a DevTools pane stays bound.
+    if (boundView === "frame") boundView = null;
     panelEl?.remove();
     markersContainer?.remove();
     notesContainer?.remove();
@@ -1360,7 +1389,8 @@
   // Send the current snapshot to the background, which relays it to the bound
   // view of this tab. Calls in one task coalesce into one message.
   function publishState() {
-    if (statePublishQueued || !isActive) return;
+    // Without a bound view nobody reads the state. VIEW_BOUND publishes it.
+    if (statePublishQueued || !isActive || !boundView) return;
     statePublishQueued = true;
     Promise.resolve().then(() => {
       statePublishQueued = false;
@@ -1511,6 +1541,143 @@
     applyAction(checked.action.name, checked.action.args);
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // Panel views: DevTools pane, iframe fallback, light-DOM panel (plan 1055)
+  // ─────────────────────────────────────────────────────────────────────
+
+  const FRAME_BIND_TIMEOUT_MS = 3000;
+  const EXTENSION_ORIGIN = chrome.runtime.getURL("").replace(/\/$/, "");
+
+  // The height of whichever panel is visible, else 96.
+  function visiblePanelHeight() {
+    const host = panelHostEl && panelHostEl.style.display !== "none" ? panelHostEl.offsetHeight : 0;
+    const light = panelEl && panelEl.style.display !== "none" ? panelEl.offsetHeight : 0;
+    return host || light || 96;
+  }
+
+  function applyPanelMode(mode) {
+    panelMode = mode;
+    // The light-DOM panel shows only when no other view is, or is about to be.
+    if (panelEl) panelEl.style.display = mode === "light" ? "" : "none";
+  }
+
+  function clearFrameTimer() {
+    clearTimeout(frameTimer);
+    frameTimer = null;
+  }
+
+  function removePanelFrame() {
+    clearFrameTimer();
+    panelHostEl?.remove();
+    panelHostEl = null;
+    panelFrameEl = null;
+  }
+
+  // Ask the background for a one-time token and hand it to the frame by
+  // postMessage. Only an extension document in that frame can receive it, and
+  // it is in no attribute or URL.
+  async function postFrameToken() {
+    const frame = panelFrameEl;
+    if (!frame || !isActive) return;
+    const sent = await PiSafeRuntime.sendMessageSafe({
+      type: PiPanelProtocol.TYPES.FRAME_TOKEN_REQUEST,
+      generation: sessionGeneration,
+    });
+    const token = sent.ok ? sent.value?.token : null;
+    if (typeof token !== "string" || !token) {
+      console.warn("[pi-annotate] Panel frame: the background gave no token");
+      return;
+    }
+    if (frame !== panelFrameEl || !frame.contentWindow) return;
+    frame.contentWindow.postMessage({ type: PiPanelProtocol.TYPES.PI_FRAME_TOKEN, token }, EXTENSION_ORIGIN);
+  }
+
+  function showLightPanel(reason) {
+    console.warn(`[pi-annotate] Using the in-page panel: ${reason}`);
+    removePanelFrame();
+    applyPanelMode("light");
+  }
+
+  function startFrameTimer() {
+    clearFrameTimer();
+    frameTimer = setTimeout(() => {
+      frameTimer = null;
+      if (panelMode === "frame-pending") showLightPanel("the panel frame did not bind within 3 seconds");
+    }, FRAME_BIND_TIMEOUT_MS);
+  }
+
+  function createPanelFrame() {
+    if (panelHostEl || !isActive || !document.body) return;
+    try {
+      panelHostEl = document.createElement("div");
+      panelHostEl.id = "pi-panel-host";
+      panelFrameEl = document.createElement("iframe");
+      panelFrameEl.id = "pi-panel-frame";
+      panelFrameEl.setAttribute("allow", "clipboard-write");
+      panelFrameEl.setAttribute("title", "Pi Annotate panel");
+      panelFrameEl.addEventListener("load", postFrameToken);
+      panelFrameEl.src = chrome.runtime.getURL("panel/panel.html?host=frame");
+      panelHostEl.appendChild(panelFrameEl);
+      addContainmentListeners(panelHostEl);
+      document.body.appendChild(panelHostEl);
+      applyPanelMode("frame-pending");
+      startFrameTimer();
+    } catch (err) {
+      showLightPanel(`the panel frame could not be made (${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+
+  // A false PI_FRAME_UNBOUND from a page costs one extra token at most, so only
+  // our own frame is believed.
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (!data || data.type !== PiPanelProtocol.TYPES.PI_FRAME_UNBOUND) return;
+    if (!isActive || !panelFrameEl || event.source !== panelFrameEl.contentWindow) return;
+    if (panelMode === "frame") applyPanelMode("frame-pending");
+    startFrameTimer();
+    postFrameToken();
+  });
+
+  function onViewBinding(type, kind) {
+    if (kind !== "pane" && kind !== "frame") return;
+    if (type === PiPanelProtocol.TYPES.VIEW_BOUND) {
+      // Remember the binding even between sessions, so a new session knows
+      // whether a pane is waiting.
+      boundView = kind;
+      if (!isActive) return;
+      if (kind === "pane") {
+        removePanelFrame();
+        applyPanelMode("pane");
+      } else if (panelHostEl) {
+        clearFrameTimer();
+        applyPanelMode("frame");
+      }
+      publishState();
+      return;
+    }
+    // VIEW_UNBOUND
+    if (boundView === kind) boundView = null;
+    if (!isActive) return;
+    if (kind === "pane") {
+      // The DevTools pane went away: show the iframe panel with a new token.
+      createPanelFrame();
+    } else if (panelHostEl && panelMode === "frame") {
+      applyPanelMode("frame-pending");
+      startFrameTimer();
+      postFrameToken();
+    }
+  }
+
+  // Choose the view for a new session. A bound pane needs no iframe.
+  function startPanelView() {
+    if (boundView === "pane") {
+      applyPanelMode("pane");
+      return;
+    }
+    applyPanelMode("light");
+    createPanelFrame();
+  }
+
   /**
    * Suspend or resume element picking without ending the session.
    *
@@ -1565,7 +1732,7 @@
     const rect = element.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const panelHeight = document.getElementById("pi-panel")?.offsetHeight || 96;
+    const panelHeight = visiblePanelHeight();
     const margin = 16;
     
     // Try right side first
@@ -1629,7 +1796,7 @@
     // Clamp to viewport
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const panelHeight = document.getElementById("pi-panel")?.offsetHeight || 96;
+    const panelHeight = visiblePanelHeight();
     adjusted.x = Math.max(16, Math.min(adjusted.x, vw - cardSize.width - 16));
     adjusted.y = Math.max(16, Math.min(adjusted.y, vh - cardSize.height - panelHeight - 16));
     
@@ -2202,7 +2369,7 @@
       hideTooltip();
       return;
     }
-    if (!isActive || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) {
+    if (!isActive || e.target.closest("#pi-panel") || e.target.closest("#pi-panel-host") || e.target.closest(".pi-note-card")) {
       hideHighlight();
       hideTooltip();
       return;
@@ -2236,7 +2403,7 @@
   
   function onWheel(e) {
     if (taileditActive() || interactActive()) return;
-    if (!isActive || !elementStack.length || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) return;
+    if (!isActive || !elementStack.length || e.target.closest("#pi-panel") || e.target.closest("#pi-panel-host") || e.target.closest(".pi-note-card")) return;
     
     if (!e.altKey) return;
     
@@ -2255,7 +2422,7 @@
     // Editing mode: don't hijack page clicks for annotation selection (plan 283).
     // Interact mode: the operator is driving the page, not picking elements.
     if (taileditActive() || interactActive()) return;
-    if (!isActive || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) return;
+    if (!isActive || e.target.closest("#pi-panel") || e.target.closest("#pi-panel-host") || e.target.closest(".pi-note-card")) return;
     
     e.preventDefault();
     e.stopPropagation();
@@ -2322,7 +2489,7 @@
   
   function handleResize() {
     updateBadges();
-    const panelHeight = document.getElementById("pi-panel")?.offsetHeight || 96;
+    const panelHeight = visiblePanelHeight();
     
     openNotes.forEach(index => {
       const card = notesContainer.querySelector(`[data-index="${index}"]`);
@@ -3856,6 +4023,9 @@
         hideable.forEach((el, i) => {
           if (el && savedDisplay[i] !== null) el.style.display = savedDisplay[i];
         });
+        // The panel may have changed view while the build ran.
+        if (panelHostEl) panelHostEl.style.display = "";
+        applyPanelMode(panelMode);
         if (paused) resumeEtchCapture();
         updateEtchCounter();
         await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));

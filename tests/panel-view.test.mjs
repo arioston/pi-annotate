@@ -267,3 +267,87 @@ test("invalid STATE messages are ignored", () => {
   assert.equal(view.state, null);
   assert.equal(doc.byId["pi-elements"].children.length, 0);
 });
+
+// ── frame boot: token tries ─────────────────────────────────────────────
+function frameBoot() {
+  const listeners = {};
+  const parent = { posted: [], postMessage(msg, origin) { this.posted.push([JSON.parse(JSON.stringify(msg)), origin]); } };
+  const ports = [];
+  const handled = [];
+  const statuses = [];
+  const bound = [];
+  const root = sandbox;
+  root.addEventListener = (type, fn) => { (listeners[type] ||= []).push(fn); };
+  root.parent = parent;
+  root.document = { querySelector: () => null };
+  root.chrome = {
+    runtime: {
+      connect: (info) => {
+        const port = {
+          info, sent: [], onMsg: [], onDisc: [],
+          onMessage: { addListener: (fn) => port.onMsg.push(fn) },
+          onDisconnect: { addListener: (fn) => port.onDisc.push(fn) },
+          postMessage: (m) => port.sent.push(JSON.parse(JSON.stringify(m))),
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+  };
+  const view = {
+    handleMessage: (m) => handled.push(m),
+    setStatus: (text) => statuses.push(text),
+    sendAction() {},
+  };
+  sandbox.PiPanelView.bootFrame(view, (p) => bound.push(p));
+  const token = (token, source = parent) => (listeners.message || []).forEach((fn) => fn({ source, data: { type: "PI_FRAME_TOKEN", token } }));
+  return { ports, handled, statuses, bound, parent, token };
+}
+
+test("frame: three false tokens fail visibly; the fourth message is ignored", () => {
+  const t = frameBoot();
+  for (let i = 0; i < 3; i++) t.token(`fake${i}`);
+  assert.equal(t.ports.length, 3);
+  assert.deepEqual(t.ports.map((p) => p.sent[0]), [
+    { type: "FRAME_HELLO", token: "fake0" }, { type: "FRAME_HELLO", token: "fake1" }, { type: "FRAME_HELLO", token: "fake2" },
+  ]);
+  assert.deepEqual(t.ports.map((p) => p.info.name), ["pi-frame", "pi-frame", "pi-frame"]);
+  // background closes each false port
+  t.ports.forEach((p) => p.onDisc.forEach((fn) => fn()));
+  assert.deepEqual(t.statuses, ["Panel not connected; close and start again"]);
+  t.token("real");
+  assert.equal(t.ports.length, 3, "no fourth port");
+});
+
+test("frame: the real token after two false ones binds, and a bound close asks for a new token", () => {
+  const t = frameBoot();
+  t.token("fake0");
+  t.token("fake1");
+  t.token("real");
+  t.ports[0].onDisc.forEach((fn) => fn());
+  t.ports[1].onDisc.forEach((fn) => fn());
+  t.ports[2].onMsg.forEach((fn) => fn({ type: "HELLO_ACK" }));
+  assert.equal(t.bound.length, 1);
+  assert.equal(t.bound[0], t.ports[2]);
+  assert.deepEqual(t.statuses, []);
+  // STATE from the bound port reaches the view; from an unbound port it does not
+  t.ports[2].onMsg.forEach((fn) => fn({ type: "STATE", generation: 1 }));
+  t.ports[0].onMsg.forEach((fn) => fn({ type: "STATE", generation: 9 }));
+  assert.deepEqual(t.handled.map((m) => m.generation), [1]);
+  // a message after binding does not open another port
+  t.token("late");
+  assert.equal(t.ports.length, 3);
+  // a service-worker restart closes the bound port
+  t.ports[2].onDisc.forEach((fn) => fn());
+  assert.deepEqual(t.parent.posted, [[{ type: "PI_FRAME_UNBOUND" }, "*"]]);
+  assert.equal(t.bound.at(-1), null);
+  // the counter was reset: a new token opens a new port
+  t.token("again");
+  assert.equal(t.ports.length, 4);
+});
+
+test("frame: a token message that does not come from window.parent is ignored", () => {
+  const t = frameBoot();
+  t.token("x", { not: "parent" });
+  assert.equal(t.ports.length, 0);
+});
