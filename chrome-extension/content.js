@@ -172,6 +172,17 @@
   let requestId = null;
   let multiSelectMode = false;
   let screenshotMode = "each"; // "each" | "full" | "none"
+
+  // Panel protocol state (plan 1055). content.js owns the session; a panel is
+  // a view that gets STATE snapshots and sends ACTION messages.
+  let sessionGeneration = 0;     // increases for each new session
+  let stateRevision = 0;         // increases for each user-visible state change
+  let elementCounter = 0;        // stable element ids ("e1", "e2", ...), never reused
+  let contextText = "";          // the general context, owned here, not by the input
+  let notesVisible = true;
+  let preparedInfo = null;       // { preparedId, revision } of the last Prepare output
+  let statePublishQueued = false;
+  let lastEtchCountSeen = 0;
   
   // Element picker state
   let elementStack = [];
@@ -935,6 +946,9 @@
       } else {
         activate();
       }
+    } else if (msg.type === PiPanelProtocol.TYPES.ACTION) {
+      // Only the background relays a view's action to this script.
+      if (sender.id === chrome.runtime.id && !sender.tab) handlePanelAction(msg);
     } else if (msg.type === "CANCEL") {
       const cancelledRequestId = msg.requestId || msg.id || null;
       // Ignore a late timeout/abort from a session that has already been
@@ -953,9 +967,16 @@
     if (isActive) {
       console.log("[pi-annotate] Restarting session (new request)");
       resetState();
+      sessionGeneration++;
+      stateChanged();
       return;
     }
     isActive = true;
+    sessionGeneration++;
+    contextText = "";
+    notesVisible = true;
+    preparedInfo = null;
+    lastEtchCountSeen = 0;
     
     // Inject styles
     styleEl = document.createElement("style");
@@ -1040,6 +1061,8 @@
     }
     
     // Clear context input
+    contextText = "";
+    preparedInfo = null;
     const contextEl = document.getElementById("pi-context");
     if (contextEl) contextEl.value = "";
     
@@ -1104,6 +1127,8 @@
     notePositions = new Map();
     dragState = null;
     requestId = null;
+    contextText = "";
+    preparedInfo = null;
     multiSelectMode = false;
     screenshotMode = "each";
     debugMode = false;
@@ -1213,59 +1238,46 @@
     // Contain the panel's own events so they never reach the host page.
     addContainmentListeners(panelEl);
     
-    document.getElementById("pi-close").addEventListener("click", handleCancel);
-    document.getElementById("pi-cancel").addEventListener("click", handleCancel);
-    document.getElementById("pi-submit").addEventListener("click", handleSubmit);
+    // Every control calls applyAction, the same function the DevTools pane and
+    // the iframe panel reach through the background relay (plan 1055).
+    document.getElementById("pi-close").addEventListener("click", () => applyAction("close", {}));
+    document.getElementById("pi-cancel").addEventListener("click", () => applyAction("cancel", {}));
+    document.getElementById("pi-submit").addEventListener("click", () => applyAction("submit", {}));
     
     // Mode toggle
-    document.getElementById("pi-mode-single").addEventListener("click", () => setMultiMode(false));
-    document.getElementById("pi-mode-multi").addEventListener("click", () => setMultiMode(true));
+    document.getElementById("pi-mode-single").addEventListener("click", () => applyAction("setMulti", { value: false }));
+    document.getElementById("pi-mode-multi").addEventListener("click", () => applyAction("setMulti", { value: true }));
     
     // Screenshot mode toggle
-    document.getElementById("pi-ss-each").addEventListener("click", () => setScreenshotMode("each"));
-    document.getElementById("pi-ss-full").addEventListener("click", () => setScreenshotMode("full"));
-    document.getElementById("pi-ss-none").addEventListener("click", () => setScreenshotMode("none"));
+    document.getElementById("pi-ss-each").addEventListener("click", () => applyAction("setScreenshotMode", { value: "each" }));
+    document.getElementById("pi-ss-full").addEventListener("click", () => applyAction("setScreenshotMode", { value: "full" }));
+    document.getElementById("pi-ss-none").addEventListener("click", () => applyAction("setScreenshotMode", { value: "none" }));
     
     // Notes visibility toggle
     document.getElementById("pi-notes-visible").addEventListener("change", (e) => {
-      if (e.target.checked) {
-        expandAllNotes();
-      } else {
-        collapseAllNotes();
-      }
+      applyAction("setNotesVisible", { value: e.target.checked });
     });
     
     // Debug mode toggle
     document.getElementById("pi-debug-mode").addEventListener("change", (e) => {
-      debugMode = e.target.checked;
+      applyAction("setDebug", { value: e.target.checked });
     });
 
     document.getElementById("pi-etch-mode").addEventListener("change", (e) => {
-      const toggle = e.target.closest(".pi-etch-toggle");
-      if (e.target.checked) {
-        startEtchCapture();
-        if (toggle) toggle.classList.add("recording");
-      } else {
-        stopEtchCapture();
-        if (toggle) toggle.classList.remove("recording");
-      }
+      applyAction("setEtch", { value: e.target.checked });
     });
 
     // Tailedit: shadow-DOM Tailwind class editor (plan 283)
     document.getElementById("pi-tailedit-mode").addEventListener("change", (e) => {
-      const ctrl = ensureTailedit();
-      if (!ctrl) { e.target.checked = false; return; }
-      if (e.target.checked) {
-        hideHighlight();
-        hideTooltip();
-        ctrl.enable();
-      } else {
-        ctrl.disable();
-      }
+      applyAction("setEdit", { value: e.target.checked });
     });
     
     document.getElementById("pi-interact-mode").addEventListener("change", (e) => {
-      setInteractMode(e.target.checked);
+      applyAction("setInteract", { value: e.target.checked });
+    });
+
+    document.getElementById("pi-context").addEventListener("input", (e) => {
+      applyAction("setContext", { text: e.target.value.slice(0, 10000) });
     });
     
     // Hover containment stays in the capture phase — nothing inside the panel
@@ -1278,6 +1290,192 @@
     // host page's listeners.
   }
   
+  // ─────────────────────────────────────────────────────────────────────
+  // Panel actions and state (plan 1055)
+  // ─────────────────────────────────────────────────────────────────────
+
+  function indexOfSid(id) {
+    return selectedElements.findIndex((sel) => sel.sid === id);
+  }
+
+  function buildSession() {
+    return {
+      multi: multiSelectMode,
+      screenshotMode,
+      notesVisible,
+      debug: debugMode,
+      etch: { on: etchMode, count: etchChangeCount },
+      edit: taileditActive(),
+      interact: interactMode,
+      elements: selectedElements.map((sel, i) => ({
+        id: sel.sid,
+        selector: String(sel.selector || "").slice(0, 300),
+        tag: sel.tag,
+        text: String(sel.text || "").slice(0, 100),
+        comment: elementComments.get(i) || "",
+        attachments: (elementAttachments.get(i) || []).map((a) => String(a.name || "").slice(0, 120)),
+        screenshot: elementScreenshots.get(i) !== false,
+      })),
+      context: contextText,
+      managed: requestId !== null,
+      prepared: preparedInfo,
+    };
+  }
+
+  // Send the current snapshot to the background, which relays it to the bound
+  // view of this tab. Calls in one task coalesce into one message.
+  function publishState() {
+    if (statePublishQueued || !isActive) return;
+    statePublishQueued = true;
+    Promise.resolve().then(() => {
+      statePublishQueued = false;
+      if (!isActive) return;
+      PiSafeRuntime.sendMessageSafe({
+        type: PiPanelProtocol.TYPES.STATE,
+        generation: sessionGeneration,
+        revision: stateRevision,
+        session: buildSession(),
+      });
+    });
+  }
+
+  // A user-visible state change: new revision, new snapshot.
+  function stateChanged() {
+    stateRevision++;
+    publishState();
+  }
+
+  function setNotesVisibleMode(value) {
+    notesVisible = !!value;
+    const box = document.getElementById("pi-notes-visible");
+    if (box) box.checked = notesVisible;
+    if (notesVisible) expandAllNotes();
+    else collapseAllNotes();
+  }
+
+  function setEtchMode(on) {
+    const box = document.getElementById("pi-etch-mode");
+    const toggle = box?.closest(".pi-etch-toggle");
+    if (box) box.checked = !!on;
+    if (on) {
+      if (!etchMode) startEtchCapture();
+      toggle?.classList.add("recording");
+    } else {
+      if (etchMode) stopEtchCapture();
+      toggle?.classList.remove("recording");
+    }
+  }
+
+  function setEditMode(on) {
+    const box = document.getElementById("pi-tailedit-mode");
+    if (on) {
+      const ctrl = ensureTailedit();
+      if (!ctrl) {
+        if (box) box.checked = false;
+        return;
+      }
+      if (box) box.checked = true;
+      hideHighlight();
+      hideTooltip();
+      ctrl.enable();
+    } else {
+      if (box) box.checked = false;
+      taileditController?.disable();
+    }
+  }
+
+  function setComment(index, text) {
+    elementComments.set(index, text);
+    const textarea = notesContainer?.querySelector(`[data-index="${index}"] .pi-note-textarea`);
+    if (textarea && textarea.value !== text) {
+      textarea.value = text;
+      autoResizeTextarea(textarea);
+    }
+  }
+
+  function setContext(text) {
+    contextText = text;
+    const input = document.getElementById("pi-context");
+    if (input && input.value !== text) input.value = text;
+  }
+
+  // Move the iframe host (the light-DOM panel does not move).
+  function dragPanelBy(dx, dy) {
+    const host = document.getElementById("pi-panel-host");
+    if (!host) return;
+    const rect = host.getBoundingClientRect();
+    const left = Math.min(Math.max(0, rect.left + dx), Math.max(0, window.innerWidth - 80));
+    const top = Math.min(Math.max(0, rect.top + dy), Math.max(0, window.innerHeight - 40));
+    host.style.left = `${left}px`;
+    host.style.top = `${top}px`;
+    host.style.right = "auto";
+    host.style.bottom = "auto";
+  }
+
+  /**
+   * The single dispatcher for panel controls. The light-DOM panel, the
+   * DevTools pane and the iframe panel all end here, so the three cannot
+   * drift. A view's ACTION is validated before it gets here.
+   */
+  function applyAction(name, args) {
+    switch (name) {
+      case "setMulti": setMultiMode(args.value); break;
+      case "setScreenshotMode": setScreenshotMode(args.value); break;
+      case "setNotesVisible": setNotesVisibleMode(args.value); break;
+      case "setDebug": {
+        debugMode = !!args.value;
+        const box = document.getElementById("pi-debug-mode");
+        if (box) box.checked = debugMode;
+        break;
+      }
+      case "setEtch": setEtchMode(args.value); break;
+      case "setEdit": setEditMode(args.value); break;
+      case "setInteract": setInteractMode(args.value); break;
+      case "setComment": {
+        const index = indexOfSid(args.id);
+        if (index >= 0) setComment(index, args.text);
+        break;
+      }
+      case "setContext": setContext(args.text); break;
+      case "removeElement": {
+        const index = indexOfSid(args.id);
+        if (index >= 0) removeElement(index);
+        break;
+      }
+      case "expandElement": {
+        const index = indexOfSid(args.id);
+        if (index >= 0) expandElement(index);
+        break;
+      }
+      case "contractElement": {
+        const index = indexOfSid(args.id);
+        if (index >= 0) contractElement(index);
+        break;
+      }
+      case "dragBy": dragPanelBy(args.dx, args.dy); break;
+      case "submit": handleSubmit(); return;
+      case "cancel":
+      case "close": handleCancel(); return;
+      case "prepareOutput": return; // wired with the non-destructive build (step 5)
+      default: return;
+    }
+    stateChanged();
+  }
+
+  // A view's ACTION arrives from the background relay.
+  function handlePanelAction(msg) {
+    if (!isActive) return;
+    const checked = PiPanelProtocol.validateAction(
+      { generation: msg.generation, name: msg.name, args: msg.args },
+      { generation: sessionGeneration, elementIds: selectedElements.map((sel) => sel.sid) },
+    );
+    if (!checked.ok) {
+      console.warn("[pi-annotate] Rejected panel action:", checked.reason);
+      return;
+    }
+    applyAction(checked.action.name, checked.action.args);
+  }
+
   /**
    * Suspend or resume element picking without ending the session.
    *
@@ -1432,6 +1630,7 @@
         if (next.length) elementAttachments.set(currentIndex, next);
         else elementAttachments.delete(currentIndex);
         renderAttachmentPreviews(card, currentIndex);
+        stateChanged();
       });
       preview.appendChild(remove);
       container.appendChild(preview);
@@ -1476,6 +1675,7 @@
     if (next.length) elementAttachments.set(index, next);
     else elementAttachments.delete(index);
     renderAttachmentPreviews(card, index, errorMessage);
+    stateChanged();
   }
   
   function createNoteCard(index) {
@@ -1536,7 +1736,9 @@
     // Event listeners
     const textarea = card.querySelector(".pi-note-textarea");
     textarea.addEventListener("input", () => {
-      elementComments.set(getIndex(), textarea.value);
+      const sid = selectedElements[getIndex()]?.sid;
+      if (sid) applyAction("setComment", { id: sid, text: textarea.value.slice(0, 10000) });
+      else elementComments.set(getIndex(), textarea.value);
       autoResizeTextarea(textarea);
     });
 
@@ -1560,6 +1762,7 @@
       const current = elementScreenshots.get(idx) !== false;
       elementScreenshots.set(idx, !current);
       screenshotBtn.classList.toggle("active", !current);
+      stateChanged();
     });
     
     const closeBtn = card.querySelector(".pi-note-close");
@@ -1713,6 +1916,7 @@
     
     updateBadges();
     updateConnectors();
+    stateChanged();
   }
   
   function expandElement(index) {
@@ -1727,10 +1931,11 @@
       }
       
       console.log("[pi-annotate] Expanding to parent:", parent.tagName);
-      selectedElements[index] = createSelectionData(parent);
+      selectedElements[index] = createSelectionData(parent, sel.sid);
       updateNoteCardLabel(index);
       updateBadges();
       updateConnectors();
+      stateChanged();
     } else {
       console.log("[pi-annotate] Already at root - no valid parent");
     }
@@ -1746,10 +1951,11 @@
     
     if (children.length > 0) {
       console.log("[pi-annotate] Contracting to child:", children[0].tagName);
-      selectedElements[index] = createSelectionData(children[0]);
+      selectedElements[index] = createSelectionData(children[0], sel.sid);
       updateNoteCardLabel(index);
       updateBadges();
       updateConnectors();
+      stateChanged();
     } else {
       console.log("[pi-annotate] No children to contract to");
     }
@@ -2048,6 +2254,7 @@
     
     updateBadges();
     updateConnectors();
+    stateChanged();
   }
   
   function onKeyDown(e) {
@@ -2169,8 +2376,9 @@
     return attrs;
   }
   
-  function createSelectionData(el) {
+  function createSelectionData(el, sid) {
     const data = {
+      sid: sid || "e" + (++elementCounter),
       element: el,
       selector: generateSelector(el),
       tag: el.tagName.toLowerCase(),
@@ -2685,6 +2893,7 @@
       
       updateBadges();
       updateConnectors();
+      stateChanged();
     }
   }
 
@@ -2791,6 +3000,10 @@
   }
 
   function updateEtchCounter() {
+    if (etchChangeCount !== lastEtchCountSeen) {
+      lastEtchCountSeen = etchChangeCount;
+      stateChanged();
+    }
     const counter = document.getElementById("pi-etch-count");
     if (!counter) return;
     const text = etchChangeCount > 0 ? `${etchChangeCount}` : "";
@@ -3420,7 +3633,7 @@
   // ─────────────────────────────────────────────────────────────────────
   
   async function handleSubmit() {
-    const context = document.getElementById("pi-context")?.value?.trim() || "";
+    const context = contextText.trim();
     
     // Re-capture debug data for all elements if debug mode is on at submit time
     // (handles elements selected before debug was enabled)
@@ -3436,7 +3649,7 @@
     }
 
     const elements = selectedElements.map((sel, i) => {
-      const { element, ...rest } = sel;
+      const { element, sid, ...rest } = sel;
       const attachments = elementAttachments.get(i) || [];
       return {
         ...rest,
