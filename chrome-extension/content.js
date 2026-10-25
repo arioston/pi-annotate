@@ -965,6 +965,25 @@
   });
   
   // ─────────────────────────────────────────────────────────────────────
+  // Inspector selection (plan 1055)
+  // ─────────────────────────────────────────────────────────────────────
+
+  // The DevTools pane reads $0 and calls this in the content script's isolated
+  // world: chrome.devtools.inspectedWindow.eval(..., { useContentScriptContext }).
+  // It is not a panel action. It adds the element like a shift-click does.
+  window.__piAnnotateSelect = function (el) {
+    if (!isActive || !el || el.nodeType !== 1 || isPiElement(el)) return false;
+    if (el === document.body || el === document.documentElement) return false;
+    if (selectedElements.some((sel) => sel.element === el)) return true;
+    selectElement(el);
+    createNoteCard(selectedElements.length - 1);
+    updateBadges();
+    updateConnectors();
+    stateChanged();
+    return true;
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
   // Activation
   // ─────────────────────────────────────────────────────────────────────
   
