@@ -192,6 +192,7 @@ async function resolveTargetTab(requestId) {
     requestBoundTabId: requestId && requestTabs.has(requestId) ? requestTabs.get(requestId) : null,
     lastFocusedPaneTab: router.lastFocusedPaneTab(),
     isPaneBound: router.isPaneBound,
+    boundPaneTabs: router.boundPaneTabs,
   });
   if (choice.source !== "window") {
     try {

@@ -63,6 +63,10 @@
     if (isInteger(pane) && typeof input.isPaneBound === "function" && input.isPaneBound(pane)) {
       return { source: "pane", tabId: pane };
     }
+    // One bound pane in this profile: use its tab even if it never had focus.
+    // With two or more, there is no safe guess; use the focused window.
+    var bound = typeof input.boundPaneTabs === "function" ? input.boundPaneTabs() : [];
+    if (bound.length === 1 && isInteger(bound[0])) return { source: "only-pane", tabId: bound[0] };
     return { source: "window" };
   }
 
@@ -502,6 +506,7 @@
       guardedCapture: guardedCapture,
       authorizeCapture: authorizeCapture,
       isPaneBound: function (tabId) { return !!panes[tabId]; },
+      boundPaneTabs: function () { return Object.keys(panes).map(Number); },
       lastFocusedPaneTab: function () { return lastFocusedPaneTab; },
       hasFormatCapability: function () { return formatCapability; },
       sessionOf: function (tabId) { return sessions[tabId] || null; },

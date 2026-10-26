@@ -277,6 +277,33 @@ test("PANE_FOCUS picks the target tab for a native request", () => {
   assert.equal(router.lastFocusedPaneTab(), 2);
 });
 
+test("the only bound pane is the target even when it never had focus", () => {
+  const { router } = harness();
+  const pick = () => PiRouting.selectTargetTab({
+    requestBoundTabId: null, lastFocusedPaneTab: router.lastFocusedPaneTab(),
+    isPaneBound: router.isPaneBound, boundPaneTabs: router.boundPaneTabs,
+  });
+  // no pane: the focused window decides
+  assert.deepEqual(plain(pick()), { source: "window" });
+  // one pane, no focus event: its tab
+  const p1 = pane("p1");
+  router.onPortMessage(p1, hello(7));
+  assert.equal(router.lastFocusedPaneTab(), null);
+  assert.deepEqual(plain(pick()), { source: "only-pane", tabId: 7 });
+  // two panes and no focus: no guess
+  const p2 = pane("p2");
+  router.onPortMessage(p2, hello(8));
+  assert.deepEqual(plain(pick()), { source: "window" });
+  // focus picks one of them
+  router.onPortMessage(p2, { type: "PANE_FOCUS" });
+  assert.deepEqual(plain(pick()), { source: "pane", tabId: 8 });
+  // the other pane closes and the focused one too: back to the window
+  router.onPortDisconnect(p2);
+  assert.deepEqual(plain(pick()), { source: "only-pane", tabId: 7 });
+  router.onPortDisconnect(p1);
+  assert.deepEqual(plain(pick()), { source: "window" });
+});
+
 test("a service-worker restart: views connect again and a message with a generation rebuilds the record", async () => {
   // a fresh router has no state
   const { router, log } = harness();
