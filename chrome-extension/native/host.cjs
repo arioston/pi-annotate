@@ -8,6 +8,7 @@ const {
   resolveRuntimeDirectory,
 } = require("../../src/runtime-paths.cjs");
 const announce = require("../../src/announce.cjs");
+const { formatResult } = require("../../src/format-result.cjs");
 
 const INSTANCE_ID = crypto.randomBytes(12).toString("hex");
 let REGISTRY_PATHS;
@@ -135,12 +136,56 @@ const AUTH_TOKEN = ensureToken();
 // Native messaging I/O
 let inputBuffer = Buffer.alloc(0);
 
+// Chrome rejects a single host-to-extension message above 1 MB.
+const MAX_HOST_TO_EXTENSION_BYTES = 1024 * 1024;
+
+// Returns true after a write, false when the message is too large to send.
+// The length prefix counts bytes, not UTF-16 code units.
 function writeMessage(msg) {
-  const json = JSON.stringify(msg);
+  const body = Buffer.from(JSON.stringify(msg), "utf8");
+  if (body.length > MAX_HOST_TO_EXTENSION_BYTES) return false;
   const len = Buffer.alloc(4);
-  len.writeUInt32LE(json.length);
+  len.writeUInt32LE(body.length);
   process.stdout.write(len);
-  process.stdout.write(json);
+  process.stdout.write(body);
+  return true;
+}
+
+// Capabilities this host announces to the extension. The extension sends
+// FORMAT_RESULT only to a host that lists "format-result".
+const HOST_CAPABILITIES = ["format-result"];
+const COPY_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+// FORMAT_RESULT (plan 1055): format a prepared result for the clipboard.
+// This message never reaches an agent client, and its content is never logged.
+async function handleFormatResult(msg) {
+  const copyId = msg.copyId;
+  if (typeof copyId !== "string" || !COPY_ID_PATTERN.test(copyId)) {
+    log("FORMAT_RESULT rejected invalid-copy-id");
+    return;
+  }
+  const reply = (fields, outcome) => {
+    const sent = writeMessage({ type: "FORMATTED_RESULT", copyId, ...fields });
+    if (sent) {
+      log(`FORMAT_RESULT ${copyId} ${outcome}`);
+      return;
+    }
+    // The formatted text is over the host-to-extension limit.
+    writeMessage({ type: "FORMATTED_RESULT", copyId, error: "too-large" });
+    log(`FORMAT_RESULT ${copyId} too-large`);
+  };
+  if (!msg.result || typeof msg.result !== "object" || Array.isArray(msg.result)) {
+    reply({ error: "format-failed" }, "format-failed");
+    return;
+  }
+  let text;
+  try {
+    text = await formatResult(msg.result);
+  } catch {
+    reply({ error: "format-failed" }, "format-failed");
+    return;
+  }
+  reply({ text }, "ok");
 }
 
 function processInput() {
@@ -186,6 +231,12 @@ function sendToClient(socket, msg) {
 
 // Messages from Chrome extension → route to the initiating agent client.
 function handleExtensionMessage(msg) {
+  // Handled before the log line: a prepared result holds comments and selectors.
+  if (msg?.type === "FORMAT_RESULT") {
+    handleFormatResult(msg).catch(() => log("FORMAT_RESULT failed"));
+    return;
+  }
+
   log(`From extension: ${redactForLog(msg)}`);
 
   if (msg?.type === "REGISTER_BROWSER") {
@@ -210,7 +261,7 @@ function handleExtensionMessage(msg) {
     }
     announceBrowser(id, label, browser);
     try {
-      writeMessage({ type: "BROWSER_REGISTERED", id, name, browser, ...(label ? { label } : {}) });
+      writeMessage({ type: "BROWSER_REGISTERED", id, name, browser, ...(label ? { label } : {}), capabilities: HOST_CAPABILITIES });
     } catch (err) {
       log(`Failed to acknowledge browser registration: ${err.message}`);
     }
@@ -219,7 +270,7 @@ function handleExtensionMessage(msg) {
 
   // Health check - respond immediately without forwarding
   if (msg?.type === "PING") {
-    writeMessage({ type: "PONG", timestamp: Date.now() });
+    writeMessage({ type: "PONG", timestamp: Date.now(), capabilities: HOST_CAPABILITIES });
     return;
   }
 
@@ -352,7 +403,7 @@ const server = net.createServer((socket) => {
 
           // Forward to Chrome extension.
           log(`From agent: ${redactForLog(msg)}`);
-          writeMessage(msg);
+          if (!writeMessage(msg)) log("Agent message is over the 1 MB host-to-extension limit, dropped");
         }
       } catch (e) {
         log(`Pi parse error: ${e.message}`);

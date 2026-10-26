@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pi Annotate</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <div id="pi-panel">
+    <div class="pi-header">
+      <span class="pi-logo">π Annotate</span>
+      <span class="pi-hint" id="pi-hint">Click elements on the page</span>
+      <button class="pi-close" id="pi-close" title="Close">×</button>
+    </div>
+    <div class="pi-toolbar">
+      <div class="pi-mode-toggle">
+        <button class="pi-mode-btn active" id="pi-mode-single" title="Click replaces selection">Single</button>
+        <button class="pi-mode-btn" id="pi-mode-multi" title="Click adds to selection">Multi</button>
+      </div>
+      <div class="pi-screenshot-toggle">
+        <span class="pi-toggle-label">Screenshot</span>
+        <button class="pi-ss-btn active" id="pi-ss-each" title="Crop screenshot to each element">Crop</button>
+        <button class="pi-ss-btn" id="pi-ss-full" title="Capture entire viewport">Full</button>
+        <button class="pi-ss-btn" id="pi-ss-none" title="No screenshots">None</button>
+      </div>
+      <div class="pi-spacer"></div>
+      <span class="pi-count" id="pi-count">0 selected</span>
+      <label class="pi-notes-toggle" title="Show/hide all note cards">
+        <input type="checkbox" id="pi-notes-visible" checked />
+        <span>Notes</span>
+      </label>
+      <label class="pi-notes-toggle" title="Capture computed styles, layout, and CSS variables">
+        <input type="checkbox" id="pi-debug-mode" />
+        <span>Debug</span>
+      </label>
+      <label class="pi-notes-toggle pi-etch-toggle" id="pi-etch-label" title="Record DevTools edits (style, class, CSS rule changes)">
+        <input type="checkbox" id="pi-etch-mode" />
+        <span>Etch</span>
+        <span class="pi-etch-badge" id="pi-etch-count" style="display:none"></span>
+      </label>
+      <label class="pi-notes-toggle" title="Visual Tailwind class editor">
+        <input type="checkbox" id="pi-tailedit-mode" />
+        <span>Edit</span>
+      </label>
+      <label class="pi-notes-toggle pi-interact-toggle" title="Stop capturing clicks so you can use the page. Selections are kept.">
+        <input type="checkbox" id="pi-interact-mode" />
+        <span>Interact</span>
+      </label>
+    </div>
+    <div class="pi-toolbar">
+      <button class="pi-btn pi-btn-secondary pi-use-selected" id="pi-use-selected" title="Add the element selected in the Elements panel">Use selected element</button>
+    </div>
+    <div class="pi-elements" id="pi-elements"></div>
+    <div class="pi-context-row">
+      <input type="text" id="pi-context" placeholder="General context (optional)..." />
+    </div>
+    <div class="pi-actions">
+      <span class="pi-delivery" id="pi-delivery"></span>
+      <div class="pi-buttons">
+        <button class="pi-btn pi-btn-secondary" id="pi-prepare" title="Build the output without sending it">Prepare output</button>
+        <button class="pi-btn pi-btn-secondary" id="pi-copy-text" disabled>Copy prepared output</button>
+        <button class="pi-btn pi-btn-cancel" id="pi-cancel">Cancel</button>
+        <button class="pi-btn pi-btn-submit" id="pi-submit">Submit</button>
+      </div>
+    </div>
+    <div class="pi-copy-images" id="pi-copy-images"></div>
+    <div class="pi-status" id="pi-status" role="status"></div>
+    <div class="pi-manual" id="pi-manual" hidden>
+      <textarea id="pi-manual-text" readonly></textarea>
+      <div class="pi-manual-hint">Press Ctrl+C to copy</div>
+    </div>
+  </div>
+  <script src="protocol.js"></script>
+  <script src="../lib/safe-runtime.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>

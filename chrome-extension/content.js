@@ -132,6 +132,17 @@
     });
   }
   
+  // Ask the background for a screenshot of the visible tab. Resolves the
+  // response object, or null when the extension context is gone.
+  async function captureScreenshot() {
+    const sent = await PiSafeRuntime.sendMessageSafe({ type: "CAPTURE_SCREENSHOT", generation: sessionGeneration });
+    if (strictCapture) {
+      if (!sent.ok) throw new Error("The extension is not available. Reload the page and try again.");
+      if (sent.value?.error) throw new Error(sent.value.error);
+    }
+    return sent.ok ? sent.value : null;
+  }
+
   // Check if element is part of pi-annotate UI (by id or class)
   function isPiElement(el) {
     if (!el) return false;
@@ -165,6 +176,21 @@
   let requestId = null;
   let multiSelectMode = false;
   let screenshotMode = "each"; // "each" | "full" | "none"
+
+  // Panel protocol state (plan 1055). content.js owns the session; a panel is
+  // a view that gets STATE snapshots and sends ACTION messages.
+  let sessionGeneration = 0;     // increases for each new session
+  let stateRevision = 0;         // increases for each user-visible state change
+  let elementCounter = 0;        // stable element ids ("e1", "e2", ...), never reused
+  let contextText = "";          // the general context, owned here, not by the input
+  let notesVisible = true;
+  let preparedInfo = null;       // { preparedId, revision } of the last Prepare output
+  let boundView = null;          // null | "pane" | "frame": set by VIEW_BOUND / VIEW_UNBOUND
+  let panelMode = "light";       // "light" | "frame-pending" | "frame" | "pane"
+  let frameTimer = null;
+  let panelFrameEl = null;
+  let statePublishQueued = false;
+  let lastEtchCountSeen = 0;
   
   // Element picker state
   let elementStack = [];
@@ -202,6 +228,7 @@
   let highlightEl = null;
   let tooltipEl = null;
   let panelEl = null;
+  let panelHostEl = null;   // iframe panel host (plan 1055)
   let markersContainer = null;
   let styleEl = null;
 
@@ -225,7 +252,7 @@
   /** True when the event started inside pi-annotate's own chrome. */
   function fromPiSurface(target) {
     if (!target || typeof target.closest !== "function") return false;
-    return !!(target.closest("#pi-panel") || target.closest(".pi-note-card") || target.closest("#pi-tailedit-root"));
+    return !!(target.closest("#pi-panel") || target.closest("#pi-panel-host") || target.closest(".pi-note-card") || target.closest("#pi-tailedit-root"));
   }
 
   /**
@@ -662,6 +689,24 @@
     }
     
     #pi-panel * { box-sizing: border-box; }
+
+    /* Iframe fallback host (plan 1055): the same panel page in an extension frame. */
+    #pi-panel-host {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      height: min(320px, 60vh);
+      z-index: ${Z_INDEX_PANEL};
+      box-shadow: 0 -4px 24px var(--pi-shadow);
+      border-top: 1px solid var(--pi-border-muted);
+      background: var(--pi-bg-card);
+    }
+    #pi-panel-host iframe {
+      display: block;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: var(--pi-bg-card);
+    }
     
     /* Interact mode: the panel stays usable but visibly steps back, so it is
        obvious why clicking the page no longer selects anything. */
@@ -928,6 +973,11 @@
       } else {
         activate();
       }
+    } else if (msg.type === PiPanelProtocol.TYPES.VIEW_BOUND || msg.type === PiPanelProtocol.TYPES.VIEW_UNBOUND) {
+      if (sender.id === chrome.runtime.id && !sender.tab) onViewBinding(msg.type, msg.kind);
+    } else if (msg.type === PiPanelProtocol.TYPES.ACTION) {
+      // Only the background relays a view's action to this script.
+      if (sender.id === chrome.runtime.id && !sender.tab) handlePanelAction(msg);
     } else if (msg.type === "CANCEL") {
       const cancelledRequestId = msg.requestId || msg.id || null;
       // Ignore a late timeout/abort from a session that has already been
@@ -939,6 +989,25 @@
   });
   
   // ─────────────────────────────────────────────────────────────────────
+  // Inspector selection (plan 1055)
+  // ─────────────────────────────────────────────────────────────────────
+
+  // The DevTools pane reads $0 and calls this in the content script's isolated
+  // world: chrome.devtools.inspectedWindow.eval(..., { useContentScriptContext }).
+  // It is not a panel action. It adds the element like a shift-click does.
+  window.__piAnnotateSelect = function (el) {
+    if (!isActive || !el || el.nodeType !== 1 || isPiElement(el)) return false;
+    if (el === document.body || el === document.documentElement) return false;
+    if (selectedElements.some((sel) => sel.element === el)) return true;
+    selectElement(el);
+    createNoteCard(selectedElements.length - 1);
+    updateBadges();
+    updateConnectors();
+    stateChanged();
+    return true;
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
   // Activation
   // ─────────────────────────────────────────────────────────────────────
   
@@ -946,9 +1015,18 @@
     if (isActive) {
       console.log("[pi-annotate] Restarting session (new request)");
       resetState();
+      sessionGeneration++;
+      announceSession();
+      stateChanged();
       return;
     }
     isActive = true;
+    sessionGeneration++;
+    announceSession();
+    contextText = "";
+    notesVisible = true;
+    preparedInfo = null;
+    lastEtchCountSeen = 0;
     
     // Inject styles
     styleEl = document.createElement("style");
@@ -962,6 +1040,7 @@
     createMarkers();
     createNotesContainer();
     createPanel();
+    startPanelView();
     
     // Add listeners
     document.addEventListener("mousemove", onMouseMove, true);
@@ -1033,6 +1112,8 @@
     }
     
     // Clear context input
+    contextText = "";
+    preparedInfo = null;
     const contextEl = document.getElementById("pi-context");
     if (contextEl) contextEl.value = "";
     
@@ -1056,9 +1137,18 @@
     console.log("[pi-annotate] State reset for new session");
   }
   
+  // Tell the background a session started or ended. The background keeps one
+  // record for each tab (document and generation); the capture guard and the
+  // panel relay read it. A lost record is rebuilt from the next message that
+  // carries the generation.
+  function announceSession() {
+    PiSafeRuntime.sendMessageSafe({ type: PiPanelProtocol.TYPES.PANEL_SESSION, generation: sessionGeneration });
+  }
+
   function deactivate() {
     if (!isActive) return;
     isActive = false;
+    PiSafeRuntime.sendMessageSafe({ type: PiPanelProtocol.TYPES.PANEL_SESSION_END, generation: sessionGeneration });
     interactMode = false;
     
     document.removeEventListener("mousemove", onMouseMove, true);
@@ -1080,6 +1170,10 @@
     styleEl?.remove();
     highlightEl?.remove();
     tooltipEl?.remove();
+    removePanelFrame();
+    panelMode = "light";
+    // The iframe view ends with the session; a DevTools pane stays bound.
+    if (boundView === "frame") boundView = null;
     panelEl?.remove();
     markersContainer?.remove();
     notesContainer?.remove();
@@ -1097,6 +1191,8 @@
     notePositions = new Map();
     dragState = null;
     requestId = null;
+    contextText = "";
+    preparedInfo = null;
     multiSelectMode = false;
     screenshotMode = "each";
     debugMode = false;
@@ -1206,59 +1302,46 @@
     // Contain the panel's own events so they never reach the host page.
     addContainmentListeners(panelEl);
     
-    document.getElementById("pi-close").addEventListener("click", handleCancel);
-    document.getElementById("pi-cancel").addEventListener("click", handleCancel);
-    document.getElementById("pi-submit").addEventListener("click", handleSubmit);
+    // Every control calls applyAction, the same function the DevTools pane and
+    // the iframe panel reach through the background relay (plan 1055).
+    document.getElementById("pi-close").addEventListener("click", () => applyAction("close", {}));
+    document.getElementById("pi-cancel").addEventListener("click", () => applyAction("cancel", {}));
+    document.getElementById("pi-submit").addEventListener("click", () => applyAction("submit", {}));
     
     // Mode toggle
-    document.getElementById("pi-mode-single").addEventListener("click", () => setMultiMode(false));
-    document.getElementById("pi-mode-multi").addEventListener("click", () => setMultiMode(true));
+    document.getElementById("pi-mode-single").addEventListener("click", () => applyAction("setMulti", { value: false }));
+    document.getElementById("pi-mode-multi").addEventListener("click", () => applyAction("setMulti", { value: true }));
     
     // Screenshot mode toggle
-    document.getElementById("pi-ss-each").addEventListener("click", () => setScreenshotMode("each"));
-    document.getElementById("pi-ss-full").addEventListener("click", () => setScreenshotMode("full"));
-    document.getElementById("pi-ss-none").addEventListener("click", () => setScreenshotMode("none"));
+    document.getElementById("pi-ss-each").addEventListener("click", () => applyAction("setScreenshotMode", { value: "each" }));
+    document.getElementById("pi-ss-full").addEventListener("click", () => applyAction("setScreenshotMode", { value: "full" }));
+    document.getElementById("pi-ss-none").addEventListener("click", () => applyAction("setScreenshotMode", { value: "none" }));
     
     // Notes visibility toggle
     document.getElementById("pi-notes-visible").addEventListener("change", (e) => {
-      if (e.target.checked) {
-        expandAllNotes();
-      } else {
-        collapseAllNotes();
-      }
+      applyAction("setNotesVisible", { value: e.target.checked });
     });
     
     // Debug mode toggle
     document.getElementById("pi-debug-mode").addEventListener("change", (e) => {
-      debugMode = e.target.checked;
+      applyAction("setDebug", { value: e.target.checked });
     });
 
     document.getElementById("pi-etch-mode").addEventListener("change", (e) => {
-      const toggle = e.target.closest(".pi-etch-toggle");
-      if (e.target.checked) {
-        startEtchCapture();
-        if (toggle) toggle.classList.add("recording");
-      } else {
-        stopEtchCapture();
-        if (toggle) toggle.classList.remove("recording");
-      }
+      applyAction("setEtch", { value: e.target.checked });
     });
 
     // Tailedit: shadow-DOM Tailwind class editor (plan 283)
     document.getElementById("pi-tailedit-mode").addEventListener("change", (e) => {
-      const ctrl = ensureTailedit();
-      if (!ctrl) { e.target.checked = false; return; }
-      if (e.target.checked) {
-        hideHighlight();
-        hideTooltip();
-        ctrl.enable();
-      } else {
-        ctrl.disable();
-      }
+      applyAction("setEdit", { value: e.target.checked });
     });
     
     document.getElementById("pi-interact-mode").addEventListener("change", (e) => {
-      setInteractMode(e.target.checked);
+      applyAction("setInteract", { value: e.target.checked });
+    });
+
+    document.getElementById("pi-context").addEventListener("input", (e) => {
+      applyAction("setContext", { text: e.target.value.slice(0, 10000) });
     });
     
     // Hover containment stays in the capture phase — nothing inside the panel
@@ -1271,6 +1354,330 @@
     // host page's listeners.
   }
   
+  // ─────────────────────────────────────────────────────────────────────
+  // Panel actions and state (plan 1055)
+  // ─────────────────────────────────────────────────────────────────────
+
+  function indexOfSid(id) {
+    return selectedElements.findIndex((sel) => sel.sid === id);
+  }
+
+  function buildSession() {
+    return {
+      multi: multiSelectMode,
+      screenshotMode,
+      notesVisible,
+      debug: debugMode,
+      etch: { on: etchMode, count: etchChangeCount },
+      edit: taileditActive(),
+      interact: interactMode,
+      elements: selectedElements.map((sel, i) => ({
+        id: sel.sid,
+        selector: String(sel.selector || "").slice(0, 300),
+        tag: sel.tag,
+        text: String(sel.text || "").slice(0, 100),
+        comment: elementComments.get(i) || "",
+        attachments: (elementAttachments.get(i) || []).map((a) => String(a.name || "").slice(0, 120)),
+        screenshot: elementScreenshots.get(i) !== false,
+      })),
+      context: contextText,
+      managed: requestId !== null,
+      prepared: preparedInfo,
+    };
+  }
+
+  // Send the current snapshot to the background, which relays it to the bound
+  // view of this tab. Calls in one task coalesce into one message.
+  function publishState() {
+    // Without a bound view nobody reads the state. VIEW_BOUND publishes it.
+    if (statePublishQueued || !isActive || !boundView) return;
+    statePublishQueued = true;
+    Promise.resolve().then(() => {
+      statePublishQueued = false;
+      if (!isActive) return;
+      PiSafeRuntime.sendMessageSafe({
+        type: PiPanelProtocol.TYPES.STATE,
+        generation: sessionGeneration,
+        revision: stateRevision,
+        session: buildSession(),
+      });
+    });
+  }
+
+  // A user-visible state change: new revision, new snapshot.
+  function stateChanged() {
+    stateRevision++;
+    publishState();
+  }
+
+  function setNotesVisibleMode(value) {
+    notesVisible = !!value;
+    const box = document.getElementById("pi-notes-visible");
+    if (box) box.checked = notesVisible;
+    if (notesVisible) expandAllNotes();
+    else collapseAllNotes();
+  }
+
+  function setEtchMode(on) {
+    const box = document.getElementById("pi-etch-mode");
+    const toggle = box?.closest(".pi-etch-toggle");
+    if (box) box.checked = !!on;
+    if (on) {
+      if (!etchMode) startEtchCapture();
+      toggle?.classList.add("recording");
+    } else {
+      if (etchMode) stopEtchCapture();
+      toggle?.classList.remove("recording");
+    }
+  }
+
+  function setEditMode(on) {
+    const box = document.getElementById("pi-tailedit-mode");
+    if (on) {
+      const ctrl = ensureTailedit();
+      if (!ctrl) {
+        if (box) box.checked = false;
+        return;
+      }
+      if (box) box.checked = true;
+      hideHighlight();
+      hideTooltip();
+      ctrl.enable();
+    } else {
+      if (box) box.checked = false;
+      taileditController?.disable();
+    }
+  }
+
+  function setComment(index, text) {
+    elementComments.set(index, text);
+    const textarea = notesContainer?.querySelector(`[data-index="${index}"] .pi-note-textarea`);
+    if (textarea && textarea.value !== text) {
+      textarea.value = text;
+      autoResizeTextarea(textarea);
+    }
+  }
+
+  function setContext(text) {
+    contextText = text;
+    const input = document.getElementById("pi-context");
+    if (input && input.value !== text) input.value = text;
+  }
+
+  // Move the iframe host (the light-DOM panel does not move).
+  function dragPanelBy(dx, dy) {
+    const host = document.getElementById("pi-panel-host");
+    if (!host) return;
+    const rect = host.getBoundingClientRect();
+    const left = Math.min(Math.max(0, rect.left + dx), Math.max(0, window.innerWidth - 80));
+    const top = Math.min(Math.max(0, rect.top + dy), Math.max(0, window.innerHeight - 40));
+    host.style.left = `${left}px`;
+    host.style.top = `${top}px`;
+    host.style.right = "auto";
+    host.style.bottom = "auto";
+  }
+
+  /**
+   * The single dispatcher for panel controls. The light-DOM panel, the
+   * DevTools pane and the iframe panel all end here, so the three cannot
+   * drift. A view's ACTION is validated before it gets here.
+   */
+  function applyAction(name, args) {
+    switch (name) {
+      case "setMulti": setMultiMode(args.value); break;
+      case "setScreenshotMode": setScreenshotMode(args.value); break;
+      case "setNotesVisible": setNotesVisibleMode(args.value); break;
+      case "setDebug": {
+        debugMode = !!args.value;
+        const box = document.getElementById("pi-debug-mode");
+        if (box) box.checked = debugMode;
+        break;
+      }
+      case "setEtch": setEtchMode(args.value); break;
+      case "setEdit": setEditMode(args.value); break;
+      case "setInteract": setInteractMode(args.value); break;
+      case "setComment": {
+        const index = indexOfSid(args.id);
+        if (index >= 0) setComment(index, args.text);
+        break;
+      }
+      case "setContext": setContext(args.text); break;
+      case "removeElement": {
+        const index = indexOfSid(args.id);
+        if (index >= 0) removeElement(index);
+        break;
+      }
+      case "expandElement": {
+        const index = indexOfSid(args.id);
+        if (index >= 0) expandElement(index);
+        break;
+      }
+      case "contractElement": {
+        const index = indexOfSid(args.id);
+        if (index >= 0) contractElement(index);
+        break;
+      }
+      case "dragBy": dragPanelBy(args.dx, args.dy); break;
+      case "submit": handleSubmit(); return;
+      case "cancel":
+      case "close": handleCancel(); return;
+      case "prepareOutput": handlePrepareOutput(); return;
+      default: return;
+    }
+    stateChanged();
+  }
+
+  // A view's ACTION arrives from the background relay.
+  function handlePanelAction(msg) {
+    if (!isActive) return;
+    const checked = PiPanelProtocol.validateAction(
+      { generation: msg.generation, name: msg.name, args: msg.args },
+      { generation: sessionGeneration, elementIds: selectedElements.map((sel) => sel.sid) },
+    );
+    if (!checked.ok) {
+      console.warn("[pi-annotate] Rejected panel action:", checked.reason);
+      return;
+    }
+    applyAction(checked.action.name, checked.action.args);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Panel views: DevTools pane, iframe fallback, light-DOM panel (plan 1055)
+  // ─────────────────────────────────────────────────────────────────────
+
+  const FRAME_BIND_TIMEOUT_MS = 3000;
+  const EXTENSION_ORIGIN = chrome.runtime.getURL("").replace(/\/$/, "");
+
+  // The height of whichever panel is visible, else 96.
+  function visiblePanelHeight() {
+    const host = panelHostEl && panelHostEl.style.display !== "none" ? panelHostEl.offsetHeight : 0;
+    const light = panelEl && panelEl.style.display !== "none" ? panelEl.offsetHeight : 0;
+    return host || light || 96;
+  }
+
+  function applyPanelMode(mode) {
+    panelMode = mode;
+    // The light-DOM panel shows only when no other view is, or is about to be.
+    if (panelEl) panelEl.style.display = mode === "light" ? "" : "none";
+  }
+
+  function clearFrameTimer() {
+    clearTimeout(frameTimer);
+    frameTimer = null;
+  }
+
+  function removePanelFrame() {
+    clearFrameTimer();
+    panelHostEl?.remove();
+    panelHostEl = null;
+    panelFrameEl = null;
+  }
+
+  // Ask the background for a one-time token and hand it to the frame by
+  // postMessage. Only an extension document in that frame can receive it, and
+  // it is in no attribute or URL.
+  async function postFrameToken() {
+    const frame = panelFrameEl;
+    if (!frame || !isActive) return;
+    const sent = await PiSafeRuntime.sendMessageSafe({
+      type: PiPanelProtocol.TYPES.FRAME_TOKEN_REQUEST,
+      generation: sessionGeneration,
+    });
+    const token = sent.ok ? sent.value?.token : null;
+    if (typeof token !== "string" || !token) {
+      console.warn("[pi-annotate] Panel frame: the background gave no token");
+      return;
+    }
+    if (frame !== panelFrameEl || !frame.contentWindow) return;
+    frame.contentWindow.postMessage({ type: PiPanelProtocol.TYPES.PI_FRAME_TOKEN, token }, EXTENSION_ORIGIN);
+  }
+
+  function showLightPanel(reason) {
+    console.warn(`[pi-annotate] Using the in-page panel: ${reason}`);
+    removePanelFrame();
+    applyPanelMode("light");
+  }
+
+  function startFrameTimer() {
+    clearFrameTimer();
+    frameTimer = setTimeout(() => {
+      frameTimer = null;
+      if (panelMode === "frame-pending") showLightPanel("the panel frame did not bind within 3 seconds");
+    }, FRAME_BIND_TIMEOUT_MS);
+  }
+
+  function createPanelFrame() {
+    if (panelHostEl || !isActive || !document.body) return;
+    try {
+      panelHostEl = document.createElement("div");
+      panelHostEl.id = "pi-panel-host";
+      panelFrameEl = document.createElement("iframe");
+      panelFrameEl.id = "pi-panel-frame";
+      panelFrameEl.setAttribute("allow", "clipboard-write");
+      panelFrameEl.setAttribute("title", "Pi Annotate panel");
+      panelFrameEl.addEventListener("load", postFrameToken);
+      panelFrameEl.src = chrome.runtime.getURL("panel/panel.html?host=frame");
+      panelHostEl.appendChild(panelFrameEl);
+      addContainmentListeners(panelHostEl);
+      document.body.appendChild(panelHostEl);
+      applyPanelMode("frame-pending");
+      startFrameTimer();
+    } catch (err) {
+      showLightPanel(`the panel frame could not be made (${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+
+  // A false PI_FRAME_UNBOUND from a page costs one extra token at most, so only
+  // our own frame is believed.
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (!data || data.type !== PiPanelProtocol.TYPES.PI_FRAME_UNBOUND) return;
+    if (!isActive || !panelFrameEl || event.source !== panelFrameEl.contentWindow) return;
+    if (panelMode === "frame") applyPanelMode("frame-pending");
+    startFrameTimer();
+    postFrameToken();
+  });
+
+  function onViewBinding(type, kind) {
+    if (kind !== "pane" && kind !== "frame") return;
+    if (type === PiPanelProtocol.TYPES.VIEW_BOUND) {
+      // Remember the binding even between sessions, so a new session knows
+      // whether a pane is waiting.
+      boundView = kind;
+      if (!isActive) return;
+      if (kind === "pane") {
+        removePanelFrame();
+        applyPanelMode("pane");
+      } else if (panelHostEl) {
+        clearFrameTimer();
+        applyPanelMode("frame");
+      }
+      publishState();
+      return;
+    }
+    // VIEW_UNBOUND
+    if (boundView === kind) boundView = null;
+    if (!isActive) return;
+    if (kind === "pane") {
+      // The DevTools pane went away: show the iframe panel with a new token.
+      createPanelFrame();
+    } else if (panelHostEl && panelMode === "frame") {
+      applyPanelMode("frame-pending");
+      startFrameTimer();
+      postFrameToken();
+    }
+  }
+
+  // Choose the view for a new session. A bound pane needs no iframe.
+  function startPanelView() {
+    if (boundView === "pane") {
+      applyPanelMode("pane");
+      return;
+    }
+    applyPanelMode("light");
+    createPanelFrame();
+  }
+
   /**
    * Suspend or resume element picking without ending the session.
    *
@@ -1325,7 +1732,7 @@
     const rect = element.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const panelHeight = document.getElementById("pi-panel")?.offsetHeight || 96;
+    const panelHeight = visiblePanelHeight();
     const margin = 16;
     
     // Try right side first
@@ -1389,7 +1796,7 @@
     // Clamp to viewport
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const panelHeight = document.getElementById("pi-panel")?.offsetHeight || 96;
+    const panelHeight = visiblePanelHeight();
     adjusted.x = Math.max(16, Math.min(adjusted.x, vw - cardSize.width - 16));
     adjusted.y = Math.max(16, Math.min(adjusted.y, vh - cardSize.height - panelHeight - 16));
     
@@ -1425,6 +1832,7 @@
         if (next.length) elementAttachments.set(currentIndex, next);
         else elementAttachments.delete(currentIndex);
         renderAttachmentPreviews(card, currentIndex);
+        stateChanged();
       });
       preview.appendChild(remove);
       container.appendChild(preview);
@@ -1469,6 +1877,7 @@
     if (next.length) elementAttachments.set(index, next);
     else elementAttachments.delete(index);
     renderAttachmentPreviews(card, index, errorMessage);
+    stateChanged();
   }
   
   function createNoteCard(index) {
@@ -1529,7 +1938,9 @@
     // Event listeners
     const textarea = card.querySelector(".pi-note-textarea");
     textarea.addEventListener("input", () => {
-      elementComments.set(getIndex(), textarea.value);
+      const sid = selectedElements[getIndex()]?.sid;
+      if (sid) applyAction("setComment", { id: sid, text: textarea.value.slice(0, 10000) });
+      else elementComments.set(getIndex(), textarea.value);
       autoResizeTextarea(textarea);
     });
 
@@ -1553,6 +1964,7 @@
       const current = elementScreenshots.get(idx) !== false;
       elementScreenshots.set(idx, !current);
       screenshotBtn.classList.toggle("active", !current);
+      stateChanged();
     });
     
     const closeBtn = card.querySelector(".pi-note-close");
@@ -1706,6 +2118,7 @@
     
     updateBadges();
     updateConnectors();
+    stateChanged();
   }
   
   function expandElement(index) {
@@ -1720,10 +2133,11 @@
       }
       
       console.log("[pi-annotate] Expanding to parent:", parent.tagName);
-      selectedElements[index] = createSelectionData(parent);
+      selectedElements[index] = createSelectionData(parent, sel.sid);
       updateNoteCardLabel(index);
       updateBadges();
       updateConnectors();
+      stateChanged();
     } else {
       console.log("[pi-annotate] Already at root - no valid parent");
     }
@@ -1739,10 +2153,11 @@
     
     if (children.length > 0) {
       console.log("[pi-annotate] Contracting to child:", children[0].tagName);
-      selectedElements[index] = createSelectionData(children[0]);
+      selectedElements[index] = createSelectionData(children[0], sel.sid);
       updateNoteCardLabel(index);
       updateBadges();
       updateConnectors();
+      stateChanged();
     } else {
       console.log("[pi-annotate] No children to contract to");
     }
@@ -1954,7 +2369,7 @@
       hideTooltip();
       return;
     }
-    if (!isActive || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) {
+    if (!isActive || e.target.closest("#pi-panel") || e.target.closest("#pi-panel-host") || e.target.closest(".pi-note-card")) {
       hideHighlight();
       hideTooltip();
       return;
@@ -1988,7 +2403,7 @@
   
   function onWheel(e) {
     if (taileditActive() || interactActive()) return;
-    if (!isActive || !elementStack.length || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) return;
+    if (!isActive || !elementStack.length || e.target.closest("#pi-panel") || e.target.closest("#pi-panel-host") || e.target.closest(".pi-note-card")) return;
     
     if (!e.altKey) return;
     
@@ -2007,7 +2422,7 @@
     // Editing mode: don't hijack page clicks for annotation selection (plan 283).
     // Interact mode: the operator is driving the page, not picking elements.
     if (taileditActive() || interactActive()) return;
-    if (!isActive || e.target.closest("#pi-panel") || e.target.closest(".pi-note-card")) return;
+    if (!isActive || e.target.closest("#pi-panel") || e.target.closest("#pi-panel-host") || e.target.closest(".pi-note-card")) return;
     
     e.preventDefault();
     e.stopPropagation();
@@ -2041,6 +2456,7 @@
     
     updateBadges();
     updateConnectors();
+    stateChanged();
   }
   
   function onKeyDown(e) {
@@ -2073,7 +2489,7 @@
   
   function handleResize() {
     updateBadges();
-    const panelHeight = document.getElementById("pi-panel")?.offsetHeight || 96;
+    const panelHeight = visiblePanelHeight();
     
     openNotes.forEach(index => {
       const card = notesContainer.querySelector(`[data-index="${index}"]`);
@@ -2162,8 +2578,9 @@
     return attrs;
   }
   
-  function createSelectionData(el) {
+  function createSelectionData(el, sid) {
     const data = {
+      sid: sid || "e" + (++elementCounter),
       element: el,
       selector: generateSelector(el),
       tag: el.tagName.toLowerCase(),
@@ -2678,6 +3095,7 @@
       
       updateBadges();
       updateConnectors();
+      stateChanged();
     }
   }
 
@@ -2743,6 +3161,16 @@
     document.querySelectorAll("[data-pi-changed]").forEach(el => el.removeAttribute("data-pi-changed"));
   }
 
+  // <etch-pause-helpers>
+  const ETCH_OBSERVER_OPTIONS = {
+    attributes: true,
+    attributeOldValue: true,
+    characterData: true,
+    characterDataOldValue: true,
+    childList: true,
+    subtree: true,
+  };
+
   function startEtchCapture() {
     clearEtchMarkers();
     etchMode = true;
@@ -2762,14 +3190,7 @@
       updateEtchCounter();
     });
 
-    etchObserver.observe(document.documentElement, {
-      attributes: true,
-      attributeOldValue: true,
-      characterData: true,
-      characterDataOldValue: true,
-      childList: true,
-      subtree: true,
-    });
+    etchObserver.observe(document.documentElement, ETCH_OBSERVER_OPTIONS);
   }
 
   function stopEtchCapture() {
@@ -2783,7 +3204,29 @@
     updateEtchCounter();
   }
 
+  // Pause for a non-final build: process the pending records once and
+  // disconnect, but keep every baseline, the start time and the change count.
+  // Returns true when there was an observer to pause.
+  function pauseEtchCapture() {
+    if (!etchObserver) return false;
+    const pending = etchObserver.takeRecords();
+    etchObserver.disconnect();
+    if (pending.length) processEtchMutations(pending);
+    return true;
+  }
+
+  // Reconnect the same observer with the same options. It clears nothing.
+  function resumeEtchCapture() {
+    if (!etchObserver) return;
+    etchObserver.observe(document.documentElement, ETCH_OBSERVER_OPTIONS);
+  }
+  // </etch-pause-helpers>
+
   function updateEtchCounter() {
+    if (etchChangeCount !== lastEtchCountSeen) {
+      lastEtchCountSeen = etchChangeCount;
+      stateChanged();
+    }
     const counter = document.getElementById("pi-etch-count");
     if (!counter) return;
     const text = etchChangeCount > 0 ? `${etchChangeCount}` : "";
@@ -3181,7 +3624,7 @@
   async function captureBeforeAfterScreenshots() {
     clearEtchMarkers();
 
-    const afterResp = await chrome.runtime.sendMessage({ type: "CAPTURE_SCREENSHOT" });
+    const afterResp = await captureScreenshot();
     const afterScreenshot = afterResp?.dataUrl || null;
 
     // Record final values for redo
@@ -3221,7 +3664,7 @@
       await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
 
       // Capture "before" screenshot (page in original visual state)
-      const beforeResp = await chrome.runtime.sendMessage({ type: "CAPTURE_SCREENSHOT" });
+      const beforeResp = await captureScreenshot();
       beforeScreenshot = beforeResp?.dataUrl || null;
     } finally {
       // REDO: always restore modified visual state, even if before screenshot failed.
@@ -3264,6 +3707,13 @@
 
       try {
         const ruleTexts = rulesByNode.get(sheet.ownerNode);
+
+        // Nothing to restore when the sheet already holds the snapshot. This
+        // also keeps a sheet with rules that insertRule rejects unchanged.
+        if (sheet.cssRules.length === ruleTexts.length
+          && ruleTexts.every((text, i) => sheet.cssRules[i].cssText === text)) {
+          continue;
+        }
 
         // Clear current rules
         while (sheet.cssRules.length > 0) {
@@ -3412,8 +3862,22 @@
   // Submit / Cancel
   // ─────────────────────────────────────────────────────────────────────
   
-  async function handleSubmit() {
-    const context = document.getElementById("pi-context")?.value?.trim() || "";
+  // True while a non-final build (Prepare output) runs: a refused capture
+  // then fails the build instead of leaving the image out.
+  let strictCapture = false;
+  let preparing = false;
+
+  /**
+   * Build the result that Submit sends. With final: true this is exactly the
+   * old Submit path (it ends Etch). With final: false (Prepare output) it must
+   * leave the session as it found it: Etch keeps recording, change marks come
+   * back, and the hidden UI is shown again.
+   */
+  async function buildResult({ final }) {
+    // Read the revision first. Hiding and showing the UI, the debug re-capture
+    // and the capture itself do not change it.
+    const preparedRevision = stateRevision;
+    const context = contextText.trim();
     
     // Re-capture debug data for all elements if debug mode is on at submit time
     // (handles elements selected before debug was enabled)
@@ -3429,7 +3893,7 @@
     }
 
     const elements = selectedElements.map((sel, i) => {
-      const { element, ...rest } = sel;
+      const { element, sid, ...rest } = sel;
       const attachments = elementAttachments.get(i) || [];
       return {
         ...rest,
@@ -3437,123 +3901,193 @@
         ...(attachments.length ? { attachments } : {}),
       };
     });
-    
-    // Hide UI for screenshot capture
-    hideHighlight();
-    hideTooltip();
-    if (markersContainer) markersContainer.style.display = "none";
-    if (notesContainer) notesContainer.style.display = "none";
-    if (connectorsEl) connectorsEl.style.display = "none";
-    if (panelEl) panelEl.style.display = "none";
-    clearEtchMarkers();
-    
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-    
-    let screenshot = null;
-    let screenshots = [];
-    
-    if (screenshotMode !== "none") {
-      try {
-        const resp = await chrome.runtime.sendMessage({ type: "CAPTURE_SCREENSHOT" });
-        if (resp?.dataUrl) {
-          const fullScreenshot = resp.dataUrl;
-          
-          if (screenshotMode === "full") {
-            // Add numbered badges to the full screenshot so elements can be identified
-            screenshot = await addBadgesToScreenshot(fullScreenshot, selectedElements);
-          } else {
-            for (let i = 0; i < selectedElements.length; i++) {
-              const hasScreenshot = elementScreenshots.get(i) !== false;
-              const element = selectedElements[i].element;
-              if (hasScreenshot && element && document.contains(element)) {
-                const cropped = await cropToElement(fullScreenshot, element);
-                screenshots.push({ index: i + 1, dataUrl: cropped });
+
+    const hideable = [highlightEl, tooltipEl, markersContainer, notesContainer, connectorsEl, panelEl, panelHostEl];
+    const savedDisplay = hideable.map((el) => (el ? el.style.display : null));
+    const changedMarks = final ? [] : Array.from(document.querySelectorAll("[data-pi-changed]"));
+    let paused = false;
+    strictCapture = !final;
+
+    try {
+      // Hide UI for screenshot capture
+      hideHighlight();
+      hideTooltip();
+      if (markersContainer) markersContainer.style.display = "none";
+      if (notesContainer) notesContainer.style.display = "none";
+      if (connectorsEl) connectorsEl.style.display = "none";
+      if (panelEl) panelEl.style.display = "none";
+      if (panelHostEl) panelHostEl.style.display = "none";
+      clearEtchMarkers();
+      
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      
+      let screenshot = null;
+      let screenshots = [];
+      
+      if (screenshotMode !== "none") {
+        try {
+          const resp = await captureScreenshot();
+          if (resp?.dataUrl) {
+            const fullScreenshot = resp.dataUrl;
+            
+            if (screenshotMode === "full") {
+              // Add numbered badges to the full screenshot so elements can be identified
+              screenshot = await addBadgesToScreenshot(fullScreenshot, selectedElements);
+            } else {
+              for (let i = 0; i < selectedElements.length; i++) {
+                const hasScreenshot = elementScreenshots.get(i) !== false;
+                const element = selectedElements[i].element;
+                if (hasScreenshot && element && document.contains(element)) {
+                  const cropped = await cropToElement(fullScreenshot, element);
+                  screenshots.push({ index: i + 1, dataUrl: cropped });
+                }
               }
             }
           }
+        } catch (err) {
+          if (!final) throw err;
+          console.error("[pi-annotate] Screenshot failed:", err);
         }
-      } catch (err) {
-        console.error("[pi-annotate] Screenshot failed:", err);
+      }
+
+      // Edit capture
+      let editCapture = null;
+      if (etchStartTime) {
+        // Stop (Submit) or pause (Prepare) the observer first. This must happen
+        // regardless of errors below.
+        if (final) stopEtchCapture();
+        else paused = pauseEtchCapture();
+
+        try {
+          const inlineStyles = diffInlineStyles();
+          const currentRulesSnapshot = serializeAllStylesheets();
+          const rules = etchInitialRules ? diffStylesheetRules(etchInitialRules, currentRulesSnapshot) : [];
+          const dom = compileDOMChanges();
+          const changeCount = inlineStyles.length + rules.length + dom.length;
+          const warnings = [];
+
+          if (etchInitialRules?.crossOriginCount > 0) {
+            warnings.push(`${etchInitialRules.crossOriginCount} cross-origin stylesheet(s) could not be tracked`);
+          }
+          if (etchInitialRules?.skippedLargeCount > 0) {
+            warnings.push(`${etchInitialRules.skippedLargeCount} large stylesheet(s) not rule-diffed`);
+          }
+
+          let beforeScreenshot = null;
+          let afterScreenshot = null;
+
+          if (changeCount > 0) {
+            // UI is already hidden from the annotation screenshot step above
+            const shots = await captureBeforeAfterScreenshots();
+            beforeScreenshot = shots.beforeScreenshot;
+            afterScreenshot = shots.afterScreenshot;
+          }
+
+          editCapture = {
+            inlineStyles,
+            rules,
+            dom,
+            beforeScreenshot,
+            afterScreenshot,
+            duration: Date.now() - etchStartTime,
+            changeCount,
+            warnings: warnings.length > 0 ? warnings : undefined,
+          };
+        } catch (err) {
+          if (!final) throw err;
+          console.error("[pi-annotate] Edit capture failed:", err);
+        }
+      }
+
+      return {
+        preparedRevision,
+        result: {
+          success: true,
+          elements,
+          screenshot,
+          screenshots,
+          prompt: context,
+          url: window.location.href,
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+          editCapture,
+        },
+      };
+    } finally {
+      strictCapture = false;
+      if (!final && isActive) {
+        // Put everything back as it was before the build. The change marks and
+        // the UI come back first; then Etch records again.
+        for (const el of changedMarks) {
+          if (document.contains(el) && !el.hasAttribute("data-pi-changed")) el.setAttribute("data-pi-changed", "");
+        }
+        hideable.forEach((el, i) => {
+          if (el && savedDisplay[i] !== null) el.style.display = savedDisplay[i];
+        });
+        // The panel may have changed view while the build ran.
+        if (panelHostEl) panelHostEl.style.display = "";
+        applyPanelMode(panelMode);
+        if (paused) resumeEtchCapture();
+        updateEtchCounter();
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
       }
     }
+  }
 
-    // Edit capture
-    let editCapture = null;
-    if (etchStartTime) {
-      // Disconnect observer first — must happen regardless of errors below
-      stopEtchCapture();
-
-      try {
-        const inlineStyles = diffInlineStyles();
-        const currentRulesSnapshot = serializeAllStylesheets();
-        const rules = etchInitialRules ? diffStylesheetRules(etchInitialRules, currentRulesSnapshot) : [];
-        const dom = compileDOMChanges();
-        const changeCount = inlineStyles.length + rules.length + dom.length;
-        const warnings = [];
-
-        if (etchInitialRules?.crossOriginCount > 0) {
-          warnings.push(`${etchInitialRules.crossOriginCount} cross-origin stylesheet(s) could not be tracked`);
-        }
-        if (etchInitialRules?.skippedLargeCount > 0) {
-          warnings.push(`${etchInitialRules.skippedLargeCount} large stylesheet(s) not rule-diffed`);
-        }
-
-        let beforeScreenshot = null;
-        let afterScreenshot = null;
-
-        if (changeCount > 0) {
-          // UI is already hidden from the annotation screenshot step above
-          const shots = await captureBeforeAfterScreenshots();
-          beforeScreenshot = shots.beforeScreenshot;
-          afterScreenshot = shots.afterScreenshot;
-        }
-
-        editCapture = {
-          inlineStyles,
-          rules,
-          dom,
-          beforeScreenshot,
-          afterScreenshot,
-          duration: Date.now() - etchStartTime,
-          changeCount,
-          warnings: warnings.length > 0 ? warnings : undefined,
-        };
-      } catch (err) {
-        console.error("[pi-annotate] Edit capture failed:", err);
-      }
-    }
-    
-    chrome.runtime.sendMessage({
+  async function handleSubmit() {
+    const { result } = await buildResult({ final: true });
+    PiSafeRuntime.sendMessageSafe({
       type: "ANNOTATIONS_COMPLETE",
+      generation: sessionGeneration,
       requestId,
-      result: {
-        success: true,
-        elements,
-        screenshot,
-        screenshots,
-        prompt: context,
-        url: window.location.href,
-        viewport: { width: window.innerWidth, height: window.innerHeight },
-        editCapture,
-      },
+      result,
     });
     
     deactivate();
+  }
+
+  // Prepare output: build the result without ending the session, then hand it
+  // to the background, which asks the native host to format it for copying.
+  async function handlePrepareOutput() {
+    if (preparing || !isActive) return;
+    preparing = true;
+    const generation = sessionGeneration;
+    try {
+      const { preparedRevision, result } = await buildResult({ final: false });
+      if (!isActive || generation !== sessionGeneration) return;
+      preparedInfo = { preparedId: `g${generation}r${preparedRevision}`, revision: preparedRevision };
+      await PiSafeRuntime.sendMessageSafe({
+        type: PiPanelProtocol.TYPES.PREPARED_RESULT,
+        generation,
+        revision: preparedRevision,
+        result,
+      });
+    } catch (err) {
+      console.error("[pi-annotate] Prepare output failed:", err);
+      if (isActive && generation === sessionGeneration) {
+        await PiSafeRuntime.sendMessageSafe({
+          type: PiPanelProtocol.TYPES.PREPARED_RESULT,
+          generation,
+          revision: stateRevision,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } finally {
+      preparing = false;
+      publishState();
+    }
   }
   
   function handleCancel() {
     const id = requestId;
     deactivate();
     
-    try {
-      chrome.runtime.sendMessage({
-        type: "CANCEL",
-        requestId: id,
-        reason: "user",
-      });
-    } catch (e) {
-      console.log("[pi-annotate] Could not send cancel (no connection)");
-    }
+    PiSafeRuntime.sendMessageSafe({
+      type: "CANCEL",
+      requestId: id,
+      reason: "user",
+    }).then((sent) => {
+      if (!sent.ok) console.log("[pi-annotate] Could not send cancel (no connection)");
+    });
   }
   
   console.log("[pi-annotate] Content script ready (v0.4.0)");

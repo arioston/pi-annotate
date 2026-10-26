@@ -1,0 +1,58 @@
+# Messaging inventory (plan 1055, step 1)
+
+Every `chrome.runtime.*`, `chrome.tabs.sendMessage` and port call in the
+extension. "Guarded" means the call cannot throw or reject into the page when
+the extension context is invalid (after an extension reload).
+
+## content.js
+
+| Site | Call | Status |
+|---|---|---|
+| `LOADED_KEY` line | `chrome.runtime.id` read at script start | guarded (runs only when Chrome injects the script, so the context is valid) |
+| message listener | `chrome.runtime.onMessage.addListener` at script start | guarded (same reason; it is a registration, not a send) |
+| `captureScreenshot()` (used by the annotation, before and after capture) | `PiSafeRuntime.sendMessageSafe({ type: "CAPTURE_SCREENSHOT" })` | guarded |
+| `handleSubmit()` end | `PiSafeRuntime.sendMessageSafe({ type: "ANNOTATIONS_COMPLETE" })` | guarded |
+| `handleCancel()` | `PiSafeRuntime.sendMessageSafe({ type: "CANCEL" })` | guarded |
+| `publishState()` | `PiSafeRuntime.sendMessageSafe({ type: "STATE" })` | guarded |
+| `announceSession()` and `deactivate()` | `PiSafeRuntime.sendMessageSafe({ type: "PANEL_SESSION" })` and `PANEL_SESSION_END` | guarded |
+| `postFrameToken()` | `PiSafeRuntime.sendMessageSafe({ type: "FRAME_TOKEN_REQUEST" })` | guarded |
+| `handlePrepareOutput()` | `PiSafeRuntime.sendMessageSafe({ type: "PREPARED_RESULT" })` | guarded |
+| `createPanelFrame()` | `chrome.runtime.getURL` (page-side, no message) | guarded (returns a string; a throw falls back to the in-page panel) |
+
+Before plan 1055 the five `chrome.runtime.sendMessage` calls had no
+protection (three captures, one complete) or partial protection (the cancel
+call sat in a `try` block that cannot catch a rejected promise).
+
+## background.js
+
+| Call | Status |
+|---|---|
+| `chrome.runtime.connectNative`, `port.postMessage` | partly guarded (`sendToNative` has a `try`; `registerBrowser` posts without one) |
+| `chrome.tabs.sendMessage` in `sendToContentScript` | guarded (`try`/`catch`, then inject and retry) |
+| `chrome.runtime.onMessage` listener | not a send; responses use `sendResponse` |
+| `chrome.scripting.executeScript` | guarded (`try`/`catch`) |
+
+The service worker is not subject to context invalidation. New in plan 1055:
+`chrome.runtime.onConnect` ports (`pi-pane`, `pi-frame`), `port.postMessage`
+and `chrome.tabs.sendMessage` with a `documentId` or `frameId` target; every
+send is wrapped so a closed port or a missing document is ignored.
+
+## panel/panel.js (new in plan 1055)
+
+| Call | Status |
+|---|---|
+| `chrome.runtime.connect` (`pi-pane`, `pi-frame`) and `port.postMessage` | guarded (a closed port is ignored; the pane connects again, the frame asks for a new token) |
+| `chrome.devtools.inspectedWindow.eval` | guarded (the callback reports an exception) |
+
+## popup.js (not edited by this plan)
+
+| Call | Status |
+|---|---|
+| `chrome.runtime.sendMessage` GET_BROWSER_IDENTITY | not guarded (popup page; a closed popup has no page to protect) |
+| `chrome.runtime.sendMessage` SET_PROFILE_LABEL, SET_BROWSER_NAME | not guarded (same) |
+| `chrome.runtime.sendMessage` TOGGLE_PICKER | not guarded (same) |
+| `chrome.runtime.sendMessage` CHECK_CONNECTION | guarded (`try`/`catch`) |
+
+## tailedit/*.js (not edited by this plan)
+
+No `chrome.*` call. The editor talks to `content.js` through callbacks.
