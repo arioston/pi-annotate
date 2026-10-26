@@ -172,7 +172,16 @@ const router = PiRouting.createRouter({
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "pi-pane" && port.name !== "pi-frame") return;
-  port.onMessage.addListener((msg) => router.onPortMessage(port, msg));
+  port.onMessage.addListener((msg) => {
+    const outcome = router.onPortMessage(port, msg);
+    // Smoke check S0: show why a view hello was refused. Never log the token.
+    if (outcome && outcome.ok === false && (msg?.type === "PANE_HELLO" || msg?.type === "FRAME_HELLO")) {
+      const s = port.sender || {};
+      console.warn("[pi-annotate] View hello refused:", msg.type, outcome.reason, {
+        url: s.url, origin: s.origin, tabId: s.tab?.id, frameId: s.frameId, documentId: s.documentId,
+      });
+    }
+  });
   port.onDisconnect.addListener(() => router.onPortDisconnect(port));
 });
 

@@ -47,8 +47,7 @@
   "web_accessible_resources": [
     {
       "resources": ["panel/panel.html"],
-      "matches": ["<all_urls>"],
-      "use_dynamic_url": true
+      "matches": ["<all_urls>"]
     }
   ],
 
