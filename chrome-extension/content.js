@@ -1010,6 +1010,8 @@
   // The DevTools panel's "Clean up page" button calls this the same way. It
   // cancels an active session and then removes every Pi Annotate element that
   // a lost session (crash, extension reload, stale script) left on the page.
+  const removeNode = PiFn.invoke("remove");
+  const clearChangedMark = PiFn.invoke("removeAttribute", "data-pi-changed");
   window.__piAnnotateCleanup = function () {
     if (isActive) handleCancel();
     for (const id of [
@@ -1018,8 +1020,8 @@
     ]) {
       document.getElementById(id)?.remove();
     }
-    document.querySelectorAll(".pi-notes-container, .pi-connectors").forEach((el) => el.remove());
-    document.querySelectorAll("[data-pi-changed]").forEach((el) => el.removeAttribute("data-pi-changed"));
+    document.querySelectorAll(".pi-notes-container, .pi-connectors").forEach(removeNode);
+    document.querySelectorAll("[data-pi-changed]").forEach(clearChangedMark);
     document.body.style.cursor = "";
     return true;
   };
