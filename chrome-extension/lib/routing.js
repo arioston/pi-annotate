@@ -155,8 +155,11 @@
     function endSession(sender, generation) {
       var checked = ensureRecord(sender, generation);
       if (!checked.ok) return checked;
-      revokeViewState(checked.record.tabId, true);
-      delete sessions[checked.record.tabId];
+      var tabId = checked.record.tabId;
+      revokeViewState(tabId, true);
+      delete sessions[tabId];
+      // The pane stays bound; tell it the session is gone so it resets.
+      if (panes[tabId]) deps.postToPort(panes[tabId], { type: T.SESSION_ENDED });
       return { ok: true };
     }
 
@@ -195,6 +198,15 @@
       if (!info || info.kind !== "pane" || panes[info.tabId] !== port) return { ok: false };
       lastFocusedPaneTab = info.tabId;
       return { ok: true };
+    }
+
+    // A shown pane asks for a session when its tab has none. The router only
+    // decides; the background sends START_ANNOTATION to the tab.
+    function paneStart(port) {
+      var info = infoOf(port);
+      if (!info || info.kind !== "pane" || panes[info.tabId] !== port) return { ok: false, reason: "not-current" };
+      if (sessions[info.tabId]) return { ok: true, started: false };
+      return { ok: true, start: { tabId: info.tabId } };
     }
 
     // ── fallback frame binding (owned-frame proof) ───────────────────
@@ -248,6 +260,7 @@
         return { ok: false, reason: "unbound-port" };
       }
       if (msg.type === T.PANE_FOCUS) return paneFocus(port);
+      if (msg.type === T.PANE_START) return paneStart(port);
       if (msg.type === T.ACTION) return relayAction(port, info, msg);
       return { ok: false, reason: "unknown-message" };
     }

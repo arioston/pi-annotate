@@ -275,10 +275,22 @@
       render();
     }
 
+    function onSessionEnded() {
+      if (!state) return;
+      state = null;
+      prepared = null;
+      imageButtons = [];
+      ui.copyImages.textContent = "";
+      hideManual();
+      busyPreparing = false;
+      render();
+    }
+
     function handleMessage(msg) {
       if (!msg || typeof msg !== "object") return;
       if (msg.type === P.TYPES.STATE) onState(msg);
       else if (msg.type === P.TYPES.PREPARED) onPrepared(msg);
+      else if (msg.type === P.TYPES.SESSION_ENDED) onSessionEnded();
     }
 
     // ── controls ──────────────────────────────────────────────────────
@@ -399,6 +411,15 @@
 
   function bootPane(view, getPort, setPort) {
     var retryTimer = null;
+    // The panel page loads only when the panel is first shown, so it starts
+    // visible. devtools.js forwards the later onShown and onHidden events.
+    var visible = true;
+    function requestStart() {
+      var p = getPort();
+      if (p && visible && !view.state) p.postMessage({ type: P.TYPES.PANE_START });
+    }
+    root.__piPanelShown = function () { visible = true; requestStart(); };
+    root.__piPanelHidden = function () { visible = false; };
     function connect() {
       var p = root.chrome.runtime.connect({ name: "pi-pane" });
       setPort(p);
@@ -410,11 +431,14 @@
         retryTimer = setTimeout(function () { if (!getPort()) connect(); }, 1000);
       });
       p.postMessage({ type: P.TYPES.PANE_HELLO, tabId: root.chrome.devtools.inspectedWindow.tabId });
+      // An open panel is ready at once: ask for a session when the tab has none.
+      requestStart();
     }
     connect();
     root.addEventListener("focus", function () {
       var p = getPort();
       if (p) p.postMessage({ type: P.TYPES.PANE_FOCUS });
+      requestStart();
     });
     // Old selections are gone after a navigation: bind again.
     root.chrome.devtools.network.onNavigated.addListener(function () {

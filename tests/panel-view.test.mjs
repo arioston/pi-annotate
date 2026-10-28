@@ -154,6 +154,20 @@ test("Cleanup calls env.cleanupPage without a session and sends no ACTION", () =
   assert.equal(frame.sent.length, 0);
 });
 
+test("SESSION_ENDED resets the view to the waiting state", () => {
+  const { doc, view } = setup();
+  view.handleMessage(stateMsg());
+  view.handleMessage(preparedMsg());
+  view.handleMessage({ type: "SESSION_ENDED" });
+  assert.equal(view.state, null);
+  assert.equal(doc.byId["pi-status"].textContent, "Waiting for an annotation session...");
+  assert.equal(doc.byId["pi-copy-text"].disabled, true);
+  assert.equal(doc.byId["pi-submit"].disabled, true);
+  // a later session binds normally
+  view.handleMessage(stateMsg(1, {}, 2));
+  assert.equal(view.state.generation, 2);
+});
+
 test("Copy is disabled before PREPARED", () => {
   const { doc, view } = setup();
   assert.equal(doc.byId["pi-copy-text"].disabled, true);

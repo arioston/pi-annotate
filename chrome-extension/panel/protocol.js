@@ -26,7 +26,10 @@
     // view -> background (ports)
     PANE_HELLO: "PANE_HELLO",
     PANE_FOCUS: "PANE_FOCUS",
+    PANE_START: "PANE_START",
     FRAME_HELLO: "FRAME_HELLO",
+    // background -> view (the tab's session ended)
+    SESSION_ENDED: "SESSION_ENDED",
     // background -> content
     VIEW_BOUND: "VIEW_BOUND",
     VIEW_UNBOUND: "VIEW_UNBOUND",
