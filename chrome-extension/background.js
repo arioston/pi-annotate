@@ -174,6 +174,8 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "pi-pane" && port.name !== "pi-frame") return;
   port.onMessage.addListener((msg) => {
     const outcome = router.onPortMessage(port, msg);
+    // A shown pane with no session on its tab asks for one (PANE_START).
+    if (outcome?.ok && outcome.start) startUnmanagedSession(outcome.start.tabId);
     // Smoke check S0: show why a view hello was refused. Never log the token.
     if (outcome && outcome.ok === false && (msg?.type === "PANE_HELLO" || msg?.type === "FRAME_HELLO")) {
       const s = port.sender || {};
@@ -278,6 +280,17 @@ function sendToNative(msg) {
     nativePort.postMessage(msg);
   } catch (err) {
     console.error("[pi-annotate] Failed to send to native host:", err);
+  }
+}
+
+// Start an unmanaged session (no request ID) for a shown DevTools pane.
+async function startUnmanagedSession(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab || isRestrictedUrl(tab.url)) return;
+    await sendToContentScript(tabId, { type: "START_ANNOTATION" });
+  } catch (err) {
+    // The tab is gone; the pane will reconnect or close.
   }
 }
 

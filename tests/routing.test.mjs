@@ -238,6 +238,38 @@ test("disconnect and session end", () => {
   assert.deepEqual(log.toTab.map((x) => x.msg), [{ type: "VIEW_UNBOUND", kind: "pane" }]);
 });
 
+test("PANE_START asks for a session only for a bound pane whose tab has none", () => {
+  const { router } = harness();
+  const stray = pane("stray");
+  assert.equal(router.onPortMessage(stray, { type: "PANE_START" }).ok, false);
+  assert.equal(stray.closed, true);
+  const p1 = pane("p1");
+  router.onPortMessage(p1, hello(1));
+  assert.deepEqual(plain(router.onPortMessage(p1, { type: "PANE_START" })), { ok: true, start: { tabId: 1 } });
+  startSession(router, 1);
+  assert.deepEqual(plain(router.onPortMessage(p1, { type: "PANE_START" })), { ok: true, started: false });
+  // a bound frame cannot ask for a session
+  const { token } = router.requestFrameToken(content(1), 1);
+  const f = frame("f", 1);
+  router.onPortMessage(f, { type: "FRAME_HELLO", token });
+  assert.equal(router.onPortMessage(f, { type: "PANE_START" }).ok, false);
+});
+
+test("session end tells the bound pane with SESSION_ENDED", () => {
+  const { router, log } = harness();
+  startSession(router, 1);
+  const p1 = pane("p1");
+  router.onPortMessage(p1, hello(1));
+  log.toPort.length = 0;
+  router.endSession(content(1), 1);
+  assert.deepEqual(log.toPort, [{ port: "p1", msg: { type: "SESSION_ENDED" } }]);
+  // no pane bound: nothing is sent
+  startSession(router, 2);
+  log.toPort.length = 0;
+  router.endSession(content(2), 1);
+  assert.deepEqual(log.toPort, []);
+});
+
 test("VIEW_BOUND and VIEW_UNBOUND arrive in order", () => {
   const { router, log } = harness();
   startSession(router, 1);

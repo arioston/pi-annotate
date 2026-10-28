@@ -43,7 +43,7 @@
       context: $("pi-context"), elements: $("pi-elements"), delivery: $("pi-delivery"),
       prepare: $("pi-prepare"), copyText: $("pi-copy-text"), copyImages: $("pi-copy-images"),
       cancel: $("pi-cancel"), submit: $("pi-submit"), close: $("pi-close"),
-      useSelected: $("pi-use-selected"), status: $("pi-status"),
+      useSelected: $("pi-use-selected"), cleanup: $("pi-cleanup"), status: $("pi-status"),
       manual: $("pi-manual"), manualText: $("pi-manual-text"),
     };
 
@@ -275,10 +275,22 @@
       render();
     }
 
+    function onSessionEnded() {
+      if (!state) return;
+      state = null;
+      prepared = null;
+      imageButtons = [];
+      ui.copyImages.textContent = "";
+      hideManual();
+      busyPreparing = false;
+      render();
+    }
+
     function handleMessage(msg) {
       if (!msg || typeof msg !== "object") return;
       if (msg.type === P.TYPES.STATE) onState(msg);
       else if (msg.type === P.TYPES.PREPARED) onPrepared(msg);
+      else if (msg.type === P.TYPES.SESSION_ENDED) onSessionEnded();
     }
 
     // ── controls ──────────────────────────────────────────────────────
@@ -311,6 +323,10 @@
     });
     ui.useSelected.addEventListener("click", function () {
       if (typeof env.useSelected === "function") env.useSelected(function (message) { setStatus(message, "error"); });
+    });
+    // Cleanup works with or without a session; it never goes through sendAction.
+    ui.cleanup.addEventListener("click", function () {
+      if (typeof env.cleanupPage === "function") env.cleanupPage(setStatus);
     });
 
     // The click handler calls writeText first. No message, capture or native
@@ -376,6 +392,17 @@
           },
         );
       } : null,
+      cleanupPage: mode === "devtools" ? function (report) {
+        root.chrome.devtools.inspectedWindow.eval(
+          "window.__piAnnotateCleanup ? window.__piAnnotateCleanup() : false",
+          { useContentScriptContext: true },
+          function (result, exception) {
+            if (exception && exception.isException) report("Could not clean the page.", "error");
+            else if (!result) report("No Pi Annotate script on this page.", "");
+            else report("Page cleaned.", "ok");
+          },
+        );
+      } : null,
     });
 
     if (mode === "devtools") bootPane(view, function () { return port; }, function (p) { port = p; });
@@ -384,6 +411,15 @@
 
   function bootPane(view, getPort, setPort) {
     var retryTimer = null;
+    // The panel page loads only when the panel is first shown, so it starts
+    // visible. devtools.js forwards the later onShown and onHidden events.
+    var visible = true;
+    function requestStart() {
+      var p = getPort();
+      if (p && visible && !view.state) p.postMessage({ type: P.TYPES.PANE_START });
+    }
+    root.__piPanelShown = function () { visible = true; requestStart(); };
+    root.__piPanelHidden = function () { visible = false; };
     function connect() {
       var p = root.chrome.runtime.connect({ name: "pi-pane" });
       setPort(p);
@@ -395,11 +431,14 @@
         retryTimer = setTimeout(function () { if (!getPort()) connect(); }, 1000);
       });
       p.postMessage({ type: P.TYPES.PANE_HELLO, tabId: root.chrome.devtools.inspectedWindow.tabId });
+      // An open panel is ready at once: ask for a session when the tab has none.
+      requestStart();
     }
     connect();
     root.addEventListener("focus", function () {
       var p = getPort();
       if (p) p.postMessage({ type: P.TYPES.PANE_FOCUS });
+      requestStart();
     });
     // Old selections are gone after a navigation: bind again.
     root.chrome.devtools.network.onNavigated.addListener(function () {
