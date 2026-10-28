@@ -385,6 +385,10 @@ html, body { margin: 0; padding: 0; background: var(--pi-bg-card); }
 .pi-el-meta { color: var(--pi-fg-dim); font-size: 11px; }
 .pi-use-selected { display: none; }
 body[data-host="devtools"] .pi-use-selected { display: inline-block; }
+
+/* Cleanup uses inspectedWindow.eval, which only a DevTools page has. */
+.pi-cleanup { display: none; }
+body[data-host="devtools"] .pi-cleanup { display: inline-block; }
 .pi-delivery { color: var(--pi-fg-dim); font-size: 11px; margin-right: auto; align-self: center; }
 .pi-actions { flex-wrap: wrap; gap: 8px; align-items: center; }
 .pi-buttons { flex-wrap: wrap; }

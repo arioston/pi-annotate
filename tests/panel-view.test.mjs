@@ -42,7 +42,7 @@ const IDS = [
   "pi-mode-single", "pi-mode-multi", "pi-ss-each", "pi-ss-full", "pi-ss-none", "pi-count", "pi-notes-visible",
   "pi-debug-mode", "pi-etch-mode", "pi-etch-label", "pi-etch-count", "pi-tailedit-mode", "pi-interact-mode",
   "pi-context", "pi-elements", "pi-delivery", "pi-prepare", "pi-copy-text", "pi-copy-images", "pi-cancel",
-  "pi-submit", "pi-close", "pi-use-selected", "pi-status", "pi-manual", "pi-manual-text",
+  "pi-submit", "pi-close", "pi-use-selected", "pi-cleanup", "pi-status", "pi-manual", "pi-manual-text",
 ];
 
 function makeDoc() {
@@ -71,7 +71,7 @@ const session = (over = {}) => ({
 });
 const stateMsg = (revision = 1, over = {}, generation = 1) => ({ type: "STATE", generation, revision, session: session(over) });
 
-function setup({ writeText, write, order = [] } = {}) {
+function setup({ writeText, write, order = [], cleanupPage = null } = {}) {
   const doc = makeDoc();
   const sent = [];
   const clip = {
@@ -87,6 +87,7 @@ function setup({ writeText, write, order = [] } = {}) {
     Blob: class { constructor(parts, opts) { this.parts = parts; this.type = opts.type; } },
     atob: (s) => Buffer.from(s, "base64").toString("binary"),
     useSelected: null,
+    cleanupPage,
   });
   return { doc, sent, view, order };
 }
@@ -138,6 +139,19 @@ test("controls send validated ACTION messages with the current generation", () =
   ]);
   const P = sandbox.PiPanelProtocol;
   for (const m of sent) assert.equal(P.validateAction({ generation: m.generation, name: m.name, args: m.args }, { generation: 7, elementIds: ["e1", "e2"] }).ok, true);
+});
+
+test("Cleanup calls env.cleanupPage without a session and sends no ACTION", () => {
+  const calls = [];
+  const { doc, sent } = setup({ cleanupPage: (report) => { calls.push("cleanup"); report("Page cleaned.", "ok"); } });
+  doc.byId["pi-cleanup"].fire("click");
+  assert.deepEqual(calls, ["cleanup"]);
+  assert.equal(sent.length, 0);
+  assert.equal(doc.byId["pi-status"].textContent, "Page cleaned.");
+  // frame mode has no cleanupPage: the click is a no-op, never a throw
+  const frame = setup();
+  frame.doc.byId["pi-cleanup"].fire("click");
+  assert.equal(frame.sent.length, 0);
 });
 
 test("Copy is disabled before PREPARED", () => {

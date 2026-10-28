@@ -43,7 +43,7 @@
       context: $("pi-context"), elements: $("pi-elements"), delivery: $("pi-delivery"),
       prepare: $("pi-prepare"), copyText: $("pi-copy-text"), copyImages: $("pi-copy-images"),
       cancel: $("pi-cancel"), submit: $("pi-submit"), close: $("pi-close"),
-      useSelected: $("pi-use-selected"), status: $("pi-status"),
+      useSelected: $("pi-use-selected"), cleanup: $("pi-cleanup"), status: $("pi-status"),
       manual: $("pi-manual"), manualText: $("pi-manual-text"),
     };
 
@@ -312,6 +312,10 @@
     ui.useSelected.addEventListener("click", function () {
       if (typeof env.useSelected === "function") env.useSelected(function (message) { setStatus(message, "error"); });
     });
+    // Cleanup works with or without a session; it never goes through sendAction.
+    ui.cleanup.addEventListener("click", function () {
+      if (typeof env.cleanupPage === "function") env.cleanupPage(setStatus);
+    });
 
     // The click handler calls writeText first. No message, capture or native
     // call comes before it, so the click still counts as a fresh user action.
@@ -373,6 +377,17 @@
           function (result, exception) {
             if (exception && exception.isException) report("Could not read the selected element.");
             else if (!result) report("Select an element in the Elements panel while a session is active.");
+          },
+        );
+      } : null,
+      cleanupPage: mode === "devtools" ? function (report) {
+        root.chrome.devtools.inspectedWindow.eval(
+          "window.__piAnnotateCleanup ? window.__piAnnotateCleanup() : false",
+          { useContentScriptContext: true },
+          function (result, exception) {
+            if (exception && exception.isException) report("Could not clean the page.", "error");
+            else if (!result) report("No Pi Annotate script on this page.", "");
+            else report("Page cleaned.", "ok");
           },
         );
       } : null,

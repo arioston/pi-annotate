@@ -1007,6 +1007,23 @@
     return true;
   };
 
+  // The DevTools panel's "Clean up page" button calls this the same way. It
+  // cancels an active session and then removes every Pi Annotate element that
+  // a lost session (crash, extension reload, stale script) left on the page.
+  window.__piAnnotateCleanup = function () {
+    if (isActive) handleCancel();
+    for (const id of [
+      "pi-styles", "pi-highlight", "pi-tooltip", "pi-panel",
+      "pi-panel-host", "pi-markers", "pi-etch-transition-killer",
+    ]) {
+      document.getElementById(id)?.remove();
+    }
+    document.querySelectorAll(".pi-notes-container, .pi-connectors").forEach((el) => el.remove());
+    document.querySelectorAll("[data-pi-changed]").forEach((el) => el.removeAttribute("data-pi-changed"));
+    document.body.style.cursor = "";
+    return true;
+  };
+
   // ─────────────────────────────────────────────────────────────────────
   // Activation
   // ─────────────────────────────────────────────────────────────────────
