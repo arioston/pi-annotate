@@ -39,6 +39,9 @@
         "tailedit/overlay.js",
         "tailedit/guides.js",
         "tailedit/editor.js",
+        "xray/measure.js",
+        "xray/overlay.js",
+        "xray/controller.js",
         "content.js"
       ],
       "run_at": "document_idle"
@@ -59,6 +62,10 @@
         "mac": "Command+Shift+P"
       },
       "description": "Toggle element picker"
+    },
+    "toggle-xray": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "Toggle X-ray measurements"
     }
   },
   

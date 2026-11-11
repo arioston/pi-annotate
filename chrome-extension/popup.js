@@ -42,6 +42,17 @@ if (shortcutEl) {
     });
   }
 }
+// X-ray needs no native host, so its button is always visible.
+const xrayShortcutEl = document.getElementById('xray-shortcut-key');
+if (xrayShortcutEl) {
+  xrayShortcutEl.textContent = isMac ? '⌥ Shift S' : 'Alt+Shift+S';
+  if (chrome.commands && chrome.commands.getAll) {
+    chrome.commands.getAll((commands) => {
+      const xray = (commands || []).find((c) => c.name === 'toggle-xray');
+      xrayShortcutEl.textContent = xray && xray.shortcut ? xray.shortcut : 'No shortcut assigned';
+    });
+  }
+}
 const quitTipEl = document.getElementById('quit-tip');
 if (quitTipEl) {
   // Mac has ⌘Q, Windows/Linux don't have a universal quit shortcut
@@ -139,6 +150,12 @@ document.getElementById('save-browser-name')?.addEventListener('click', async (e
 // Start annotation button — routes through background script which handles injection
 document.getElementById('start-btn')?.addEventListener('click', () => {
   chrome.runtime.sendMessage({ type: "TOGGLE_PICKER" });
+  window.close();
+});
+
+// X-ray button — routes through the background script, like the picker
+document.getElementById('xray-btn')?.addEventListener('click', () => {
+  chrome.runtime.sendMessage({ type: "TOGGLE_XRAY" });
   window.close();
 });
 

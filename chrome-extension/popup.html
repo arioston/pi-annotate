@@ -100,6 +100,7 @@
       font-weight: 500;
     }
     .btn.primary:hover { background: #4f46e5; }
+    .btn.tool { margin-right: 8px; }
     
     /* Ready state */
     .ready-content {
@@ -207,6 +208,13 @@
       </div>
       <button class="btn primary" id="start-btn">Start Annotation</button>
     </div>
+  </div>
+
+  <!-- Tools: work without the native host, so they are outside the ready section -->
+  <div class="section" id="tools-section">
+    <div class="label">Tools</div>
+    <button class="btn tool" id="xray-btn">Toggle X-ray</button>
+    <span class="shortcut" id="xray-shortcut-key"></span>
   </div>
 
   <!-- Setup State -->

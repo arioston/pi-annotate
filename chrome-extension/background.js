@@ -357,6 +357,21 @@ async function togglePicker() {
   }
 }
 
+// Toggle X-ray measurements on the active tab (popup + keyboard shortcut).
+// X-ray needs no annotation session and no native host.
+async function toggleXray() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id || isRestrictedUrl(tab.url)) {
+      console.log("[pi-annotate] Cannot toggle X-ray: no valid tab");
+      return;
+    }
+    await sendToContentScript(tab.id, { type: "TOGGLE_XRAY" });
+  } catch (err) {
+    console.error("[pi-annotate] Toggle X-ray failed:", err);
+  }
+}
+
 function connectNative() {
   if (nativePort) return;
 
@@ -474,6 +489,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "TOGGLE_PICKER") {
     togglePicker();
+    return;
+  }
+
+  if (msg.type === "TOGGLE_XRAY") {
+    toggleXray();
     return;
   }
 
@@ -617,6 +637,8 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
 chrome.commands.onCommand.addListener((command) => {
   if (command === "toggle-picker") {
     togglePicker();
+  } else if (command === "toggle-xray") {
+    toggleXray();
   }
 });
 

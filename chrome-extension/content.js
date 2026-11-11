@@ -973,6 +973,9 @@
       } else {
         activate();
       }
+    } else if (msg.type === "TOGGLE_XRAY") {
+      // X-ray is its own mode: no session, no native host.
+      if (window.__piXray) window.__piXray.toggle();
     } else if (msg.type === PiPanelProtocol.TYPES.VIEW_BOUND || msg.type === PiPanelProtocol.TYPES.VIEW_UNBOUND) {
       if (sender.id === chrome.runtime.id && !sender.tab) onViewBinding(msg.type, msg.kind);
     } else if (msg.type === PiPanelProtocol.TYPES.ACTION) {
