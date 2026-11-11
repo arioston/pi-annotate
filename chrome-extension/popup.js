@@ -159,6 +159,12 @@ document.getElementById('xray-btn')?.addEventListener('click', () => {
   window.close();
 });
 
+// Full-page capture button — the background runs the capture and opens the result tab
+document.getElementById('capture-btn')?.addEventListener('click', () => {
+  chrome.runtime.sendMessage({ type: "CAPTURE_FULL_PAGE" });
+  window.close();
+});
+
 // Retry button
 document.getElementById('retry-btn')?.addEventListener('click', () => {
   checkConnection();

@@ -101,6 +101,7 @@
     }
     .btn.primary:hover { background: #4f46e5; }
     .btn.tool { margin-right: 8px; }
+    .tool-row { margin-bottom: 8px; }
     
     /* Ready state */
     .ready-content {
@@ -213,8 +214,13 @@
   <!-- Tools: work without the native host, so they are outside the ready section -->
   <div class="section" id="tools-section">
     <div class="label">Tools</div>
-    <button class="btn tool" id="xray-btn">Toggle X-ray</button>
-    <span class="shortcut" id="xray-shortcut-key"></span>
+    <div class="tool-row">
+      <button class="btn tool" id="xray-btn">Toggle X-ray</button>
+      <span class="shortcut" id="xray-shortcut-key"></span>
+    </div>
+    <div class="tool-row">
+      <button class="btn tool" id="capture-btn">Capture full page</button>
+    </div>
   </div>
 
   <!-- Setup State -->

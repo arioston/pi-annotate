@@ -42,6 +42,7 @@
         "xray/measure.js",
         "xray/overlay.js",
         "xray/controller.js",
+        "capture/page.js",
         "content.js"
       ],
       "run_at": "document_idle"
@@ -66,7 +67,8 @@
     "toggle-xray": {
       "suggested_key": { "default": "Alt+Shift+S" },
       "description": "Toggle X-ray measurements"
-    }
+    },
+    "capture-full-page": { "description": "Capture the full page" }
   },
   
   "action": {
