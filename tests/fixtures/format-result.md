@@ -63,6 +63,73 @@
 **Screenshot (full page):** <TMP>/pi-annotate-1700000000000-full.png
 
 
+<!-- case: screenshot partial -->
+## Page Annotation: https://example.test/page
+**Viewport:** 1280×720
+
+### Selected Elements (1)
+
+1. **section**
+   - Selector: `#hero`
+   - ID: `hero`
+   - Classes: `a, b`
+   - Text: "Hello world"
+   - **Box Model:** 300×200 (content: 280×180, padding: 10px 10px 10px 10px, border: 0px 0px 0px 0px, margin: 0px 0px 0px 0px)
+   - **Attributes:** role="banner"
+   - **Accessibility:** role=banner, name="Top", focusable=false, disabled=false, expanded=true
+   - **Styles:** display: block, color: red
+   - **Comment:** Make it bigger
+
+**Screenshot (full page):** <TMP>/pi-annotate-1700000000000-full.png
+*Screenshot is partial: the page is longer than 60000 CSS px*
+
+
+<!-- case: screenshot reduced -->
+## Page Annotation: https://example.test/page
+**Viewport:** 1280×720
+
+### Selected Elements (1)
+
+1. **section**
+   - Selector: `#hero`
+   - ID: `hero`
+   - Classes: `a, b`
+   - Text: "Hello world"
+   - **Box Model:** 300×200 (content: 280×180, padding: 10px 10px 10px 10px, border: 0px 0px 0px 0px, margin: 0px 0px 0px 0px)
+   - **Attributes:** role="banner"
+   - **Accessibility:** role=banner, name="Top", focusable=false, disabled=false, expanded=true
+   - **Styles:** display: block, color: red
+   - **Comment:** Make it bigger
+
+### Screenshots
+
+- Element 1: <TMP>/pi-annotate-1700000000000-el1.png
+*Screenshot was reduced to fit the size limit*
+
+
+
+<!-- case: screenshot partial and reduced without a picture -->
+## Page Annotation: https://example.test/page
+**Viewport:** 1280×720
+
+### Selected Elements (1)
+
+1. **section**
+   - Selector: `#hero`
+   - ID: `hero`
+   - Classes: `a, b`
+   - Text: "Hello world"
+   - **Box Model:** 300×200 (content: 280×180, padding: 10px 10px 10px 10px, border: 0px 0px 0px 0px, margin: 0px 0px 0px 0px)
+   - **Attributes:** role="banner"
+   - **Accessibility:** role=banner, name="Top", focusable=false, disabled=false, expanded=true
+   - **Styles:** display: block, color: red
+   - **Comment:** Make it bigger
+
+*Screenshot is partial: the page capture failed, so this is the visible part only*
+*Screenshot was reduced to fit the size limit*
+
+
+
 <!-- case: attachment -->
 ## Page Annotation: https://example.test/page
 **Viewport:** 1280×720

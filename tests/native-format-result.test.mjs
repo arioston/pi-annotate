@@ -171,3 +171,21 @@ test("PONG and BROWSER_REGISTERED carry the format-result capability", async (t)
   const pong = await waitFor(() => extensionMessages.find((m) => m.type === "PONG"), "no PONG");
   assert.deepEqual(pong.capabilities, ["format-result"]);
 });
+
+test("FORMAT_RESULT prints one line for a partial and a reduced screenshot, and none when both are absent (plan 1170)", async (t) => {
+  const { host, extensionMessages } = await setup(t);
+
+  host.stdin.write(nativeFrame({ type: "FORMAT_RESULT", copyId: "plain", result: goodResult("p") }));
+  host.stdin.write(nativeFrame({
+    type: "FORMAT_RESULT",
+    copyId: "flags",
+    result: { ...goodResult("f"), screenshotPartial: "tiles", screenshotReduced: true },
+  }));
+  await waitFor(() => extensionMessages.filter((m) => m.type === "FORMATTED_RESULT").length >= 2, "missing replies");
+
+  const byId = (id) => extensionMessages.find((m) => m.type === "FORMATTED_RESULT" && m.copyId === id);
+  assert.equal(byId("plain").text.includes("Screenshot is partial"), false);
+  assert.equal(byId("plain").text.includes("Screenshot was reduced"), false);
+  assert.ok(byId("flags").text.includes("*Screenshot is partial: the page needed more than 60 pictures*"));
+  assert.ok(byId("flags").text.includes("*Screenshot was reduced to fit the size limit*"));
+});

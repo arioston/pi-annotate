@@ -7,6 +7,28 @@ const os = require("node:os");
 const path = require("node:path");
 
 const MAX_SCREENSHOT_BYTES = 15 * 1024 * 1024; // 15MB
+// Why a screenshot is partial (result.screenshotPartial, plan 1170).
+const PARTIAL_REASONS = {
+  tiles: "the page needed more than 60 pictures",
+  height: "the page is longer than 60000 CSS px",
+  canvas: "the page is taller than one image can be",
+  viewport: "the page capture failed, so this is the visible part only",
+};
+
+// One line each for a partial or reduced screenshot (plan 1170).
+function screenshotNotes(result) {
+  let notes = "";
+  if (result.screenshotPartial) {
+    notes += `*Screenshot is partial: ${PARTIAL_REASONS[result.screenshotPartial] || "the capture stopped early"}*\n`;
+  }
+  if (result.screenshotReduced) notes += "*Screenshot was reduced to fit the size limit*\n";
+  return notes;
+}
+
+// A reduced screenshot (plan 1170) can be a JPEG. The file name follows the data.
+function imageExtension(dataUrl) {
+  return /^data:image\/jpe?g[;,]/.test(dataUrl) ? "jpg" : "png";
+}
 
 function formatEditCapture(capture) {
   let output = "";
@@ -190,7 +212,7 @@ async function formatResult(result) {
     // Full page screenshot
     try {
       if (!result.screenshot.startsWith("data:image/")) throw new Error("Invalid screenshot data");
-      const screenshotPath = path.join(os.tmpdir(), `pi-annotate-${timestamp}-full.png`);
+      const screenshotPath = path.join(os.tmpdir(), `pi-annotate-${timestamp}-full.${imageExtension(result.screenshot)}`);
       const base64Data = result.screenshot.replace(/^data:image\/\w+;base64,/, "");
       const buffer = Buffer.from(base64Data, "base64");
       if (buffer.length > MAX_SCREENSHOT_BYTES) throw new Error("Screenshot too large");
@@ -199,6 +221,7 @@ async function formatResult(result) {
     } catch (err) {
       output += `*Screenshot capture failed: ${err}*\n`;
     }
+    output += screenshotNotes(result);
   }
 
   if (result.screenshots && result.screenshots.length > 0) {
@@ -209,7 +232,7 @@ async function formatResult(result) {
       try {
         if (!shot?.dataUrl?.startsWith("data:image/")) throw new Error("Invalid screenshot data");
         const safeIndex = Number.isFinite(shot.index) ? Math.max(1, Math.floor(shot.index)) : i + 1;
-        const screenshotPath = path.join(os.tmpdir(), `pi-annotate-${timestamp}-el${safeIndex}.png`);
+        const screenshotPath = path.join(os.tmpdir(), `pi-annotate-${timestamp}-el${safeIndex}.${imageExtension(shot.dataUrl)}`);
         const base64Data = shot.dataUrl.replace(/^data:image\/\w+;base64,/, "");
         const buffer = Buffer.from(base64Data, "base64");
         if (buffer.length > MAX_SCREENSHOT_BYTES) throw new Error("Screenshot too large");
@@ -220,7 +243,11 @@ async function formatResult(result) {
         output += `- Element ${shot?.index ?? i + 1}: *capture failed (${message})*\n`;
       }
     }
+    if (!result.screenshot) output += screenshotNotes(result);
     output += "\n";
+  } else if (!result.screenshot) {
+    const notes = screenshotNotes(result);
+    if (notes) output += notes + "\n";
   }
 
   if (result.elements?.some((element) => element.attachments?.length)) {

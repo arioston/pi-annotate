@@ -188,6 +188,14 @@ export interface AnnotationResult {
   screenshot?: string;
   /** Individual element screenshots (default mode) */
   screenshots?: ElementScreenshot[];
+  /**
+   * Set when a screenshot does not cover everything that was asked for:
+   * "tiles" or "height" (a capture limit), "canvas" (the page is above one
+   * image), or "viewport" (the page capture failed; the picture is the viewport).
+   */
+  screenshotPartial?: "tiles" | "height" | "canvas" | "viewport";
+  /** True when a screenshot was re-encoded or scaled down to fit the size limit */
+  screenshotReduced?: boolean;
   /** User's description of what should change */
   prompt?: string;
   /** URL of the annotated page */

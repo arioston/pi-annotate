@@ -46,6 +46,9 @@ const cases = () => ({
   "one element with a comment": base({ prompt: "General context" }),
   "element screenshots": base({ screenshots: [{ index: 1, dataUrl: PNG }, { index: 2, dataUrl: "not-an-image" }] }),
   "full screenshot": base({ screenshot: PNG }),
+  "screenshot partial": base({ screenshot: PNG, screenshotPartial: "height" }),
+  "screenshot reduced": base({ screenshots: [{ index: 1, dataUrl: PNG }], screenshotReduced: true }),
+  "screenshot partial and reduced without a picture": base({ screenshotPartial: "viewport", screenshotReduced: true }),
   "attachment": base({
     elements: [element({ attachments: [{ id: "x", name: "ref.webp", mimeType: "image/webp", width: 1, height: 1, size: 10, dataUrl: WEBP }] })],
   }),
@@ -119,4 +122,27 @@ test("the fixture carries no machine path", () => {
   const text = fs.readFileSync(fixturePath, "utf8");
   assert.equal(/\/home\/|\/Users\/|\/var\/folders/.test(text), false);
   assert.equal(text.includes("<TMP>"), true);
+});
+
+test("both new screenshot fields absent leave the output unchanged, each field prints one line (plan 1170)", async () => {
+  const impl = createRequire(import.meta.url)(cjsPath);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-annotate-fmt-"));
+  const savedTmp = process.env.TMPDIR;
+  process.env.TMPDIR = tmp;
+  try {
+    const plain = await impl.formatResult(base({ screenshot: PNG }));
+    assert.equal(/Screenshot is partial|Screenshot was reduced/.test(plain), false);
+    const partial = await impl.formatResult(base({ screenshot: PNG, screenshotPartial: "tiles" }));
+    assert.equal((partial.match(/Screenshot is partial/g) || []).length, 1);
+    assert.equal(partial.includes("Screenshot was reduced"), false);
+    const reduced = await impl.formatResult(base({ screenshot: PNG, screenshotReduced: true }));
+    assert.equal((reduced.match(/Screenshot was reduced/g) || []).length, 1);
+    assert.equal(reduced.includes("Screenshot is partial"), false);
+    // A JPEG keeps its own file extension.
+    const jpg = await impl.formatResult(base({ screenshot: PNG.replace("image/png", "image/jpeg") }));
+    assert.ok(/-full\.jpg/.test(jpg));
+  } finally {
+    if (savedTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmp;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
