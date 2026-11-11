@@ -1,0 +1,30 @@
+<!doctype html>
+<!--
+  X-ray fixture (plan 1168). Open as a file:// page, press Alt+Shift+S, hold
+  Shift, and drag over the whole page. Expected numbers (CSS px, page at 100%):
+
+    .card        320 x 120, padding 16 (all sides), radius 12, flex row
+    gap          12 between the two buttons (on the grid)
+    buttons      120 x 32 each; the left one has radius 8 (its arc centre
+                 is not the card's, so the label is a plain radius 8)
+    .odd         200 x 40, 1 px border, padding 15 (off the grid: marked)
+    .spread      justify-content: space-between; NO gap spec
+
+  tests/xray-measure.test.mjs builds the same layout as records and asserts
+  the same numbers.
+-->
+<meta charset="utf-8">
+<title>X-ray fixture</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.2 sans-serif; background: #f4f4f4; width: 320px; }
+  .card { display: flex; gap: 12px; width: 320px; height: 120px; padding: 16px; border-radius: 12px; background: #fff; }
+  .card button { width: 120px; height: 32px; border: 0; background: #0a84ff; color: #fff; }
+  .card button:first-child { border-radius: 8px; }
+  .odd { margin-top: 20px; width: 200px; height: 40px; padding: 15px; border: 1px solid #888; }
+  .spread { margin-top: 20px; display: flex; justify-content: space-between; width: 320px; }
+  .spread span { width: 40px; height: 32px; background: #ccc; }
+</style>
+<div class="card"><button>Left</button><button>Right</button></div>
+<div class="odd">Odd</div>
+<div class="spread"><span></span><span></span></div>
