@@ -17,6 +17,7 @@ the extension context is invalid (after an extension reload).
 | `announceSession()` and `deactivate()` | `PiSafeRuntime.sendMessageSafe({ type: "PANEL_SESSION" })` and `PANEL_SESSION_END` | guarded |
 | `postFrameToken()` | `PiSafeRuntime.sendMessageSafe({ type: "FRAME_TOKEN_REQUEST" })` | guarded |
 | `handlePrepareOutput()` | `PiSafeRuntime.sendMessageSafe({ type: "PREPARED_RESULT" })` | guarded |
+| message listener, `TOGGLE_XRAY` branch (plan 1168) | no send; calls `window.__piXray.toggle()` |
 | `createPanelFrame()` | `chrome.runtime.getURL` (page-side, no message) | guarded (returns a string; a throw falls back to the in-page panel) |
 
 Before plan 1055 the five `chrome.runtime.sendMessage` calls had no
@@ -30,6 +31,7 @@ call sat in a `try` block that cannot catch a rejected promise).
 | `chrome.runtime.connectNative`, `port.postMessage` | partly guarded (`sendToNative` has a `try`; `registerBrowser` posts without one) |
 | `chrome.tabs.sendMessage` in `sendToContentScript` | guarded (`try`/`catch`, then inject and retry) |
 | `chrome.runtime.onMessage` listener | not a send; responses use `sendResponse` |
+| `TOGGLE_XRAY` handler and `toggleXray()` (plan 1168) | `chrome.tabs.sendMessage` through `sendToContentScript`; guarded |
 | `chrome.scripting.executeScript` | guarded (`try`/`catch`) |
 
 The service worker is not subject to context invalidation. New in plan 1055:
@@ -51,7 +53,12 @@ send is wrapped so a closed port or a missing document is ignored.
 | `chrome.runtime.sendMessage` GET_BROWSER_IDENTITY | not guarded (popup page; a closed popup has no page to protect) |
 | `chrome.runtime.sendMessage` SET_PROFILE_LABEL, SET_BROWSER_NAME | not guarded (same) |
 | `chrome.runtime.sendMessage` TOGGLE_PICKER | not guarded (same) |
+| `chrome.runtime.sendMessage` TOGGLE_XRAY (plan 1168) | not guarded (same) |
 | `chrome.runtime.sendMessage` CHECK_CONNECTION | guarded (`try`/`catch`) |
+
+## xray/*.js (X-ray, plan 1168)
+
+No `chrome.*` call. Controlled by `content.js` through `window.__piXray.toggle()`.
 
 ## tailedit/*.js (not edited by this plan)
 

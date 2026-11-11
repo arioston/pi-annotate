@@ -171,10 +171,13 @@ The call blocks until you submit or cancel in the browser (or the timeout fires)
 | Toggle edit capture | "Etch" toggle in toolbar |
 | Toggle annotation UI | `⌘/Ctrl+Shift+P` |
 | Close | `ESC` |
+| Toggle X-ray | `Alt+Shift+S`, then Shift+drag a frame (Escape closes it) |
 
 ## Features
 
 **Context Capture** — Each element automatically gets box model breakdown (padding, border, margin), accessibility info (role, name, focusable, ARIA states), all HTML attributes, and key CSS styles (display, position, overflow, colors, typography). Enable **Debug mode** for computed styles (40+ properties), parent context, and CSS variables.
+
+**X-ray** — Turn on X-ray (`Alt+Shift+S` or the popup button), hold Shift, and drag a frame over any page. The frame shows the gaps, paddings, sizes, and corner radii of the elements inside it, snapped to a 4 px grid. A value that is not a multiple of 4 CSS px has a different label colour. It needs no annotation session and sends no data. For a `file://` page, turn on "Allow access to file URLs" in the extension details. See `docs/xray.md`.
 
 **Inline Note Cards** — Draggable floating cards with per-element comments, SVG connectors linking notes to elements, click-to-scroll, and per-element screenshot toggles.
 
