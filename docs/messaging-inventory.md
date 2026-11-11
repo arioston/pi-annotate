@@ -39,6 +39,16 @@ The service worker is not subject to context invalidation. New in plan 1055:
 and `chrome.tabs.sendMessage` with a `documentId` or `frameId` target; every
 send is wrapped so a closed port or a missing document is ignored.
 
+## Full-page capture (plan 1169)
+
+| Message | Direction | Notes |
+|---|---|---|
+| `CAPTURE_FULL_PAGE` | popup to background | starts a capture of the active tab; not guarded (popup page) |
+| `CAPTURE_PAGE_BEGIN` | background to content | `chrome.tabs.sendMessage` through `requestContentScript` (inject on a miss); the page answers with its metrics or a refusal |
+| `CAPTURE_PAGE_STEP` | background to content | scroll to a position; the page answers with the reported scroll position |
+| `CAPTURE_PAGE_END` | background to content | restore the page; sent from a `finally` block |
+| `CAPTURE_PAGE_ABORT` | content to background | `PiSafeRuntime.sendMessageSafe`; guarded; sent on Escape |
+
 ## panel/panel.js (new in plan 1055)
 
 | Call | Status |
