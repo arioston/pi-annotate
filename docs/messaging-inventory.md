@@ -48,6 +48,7 @@ send is wrapped so a closed port or a missing document is ignored.
 | `CAPTURE_PAGE_STEP` | background to content | scroll to a position; the page answers with the reported scroll position |
 | `CAPTURE_PAGE_END` | background to content | restore the page; sent from a `finally` block |
 | `CAPTURE_PAGE_ABORT` | content to background | `PiSafeRuntime.sendMessageSafe`; guarded; sent on Escape |
+| `CAPTURE_PAGE` (plan 1170) | content to background | `PiSafeRuntime.sendMessageSafe` from `requestPageCapture()`; guarded. The background runs `router.guardedCapture` around the whole multi-picture loop and answers with the tiles as data URLs (nothing is stored) |
 
 ## panel/panel.js (new in plan 1055)
 

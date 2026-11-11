@@ -63,6 +63,52 @@ Press Escape during a capture to stop it. Nothing is stored in that case.
   copies the first.
 - **No editor.** For crop and draw, use an annotation session.
 
+## Session screenshots (plan 1170)
+
+The annotation session uses the same engine, through the message
+`CAPTURE_PAGE`. The background runs the capture loop under the router guard
+(the session generation, and the active tab before and after each picture). It
+stores nothing and opens no tab. It returns the pictures, and the content
+script joins them with the join planner, then crops and badges with content
+coordinates.
+
+Rules:
+
+1. **Crop.** When each selected element with a screenshot is fully inside the
+   viewport, the one-picture path runs as before, and the page does not
+   scroll. Otherwise a page capture runs, and each element is cropped whole
+   from the page image.
+2. **Full.** Always a page capture. The button title is "Capture the entire
+   page".
+3. **Limits.** The capture stops at the limits above. The result then has
+   `screenshotPartial` ("tiles", "height", or "canvas"), and the agent output
+   says that the screenshot is partial.
+4. **Size.** Before the send, an image above 12 MB as PNG is encoded again as
+   JPEG (quality 0.85). If it is still above 12 MB, it is scaled down by steps
+   of 0.75. The result has `screenshotReduced`, and the agent output says so.
+   The 12 MB rule is below the host limit of 15 MB on purpose. Change both
+   together.
+5. **Fallback.** A failed page capture in a final submit falls back to the
+   viewport picture. The result has `screenshotPartial: "viewport"`. Text and
+   selections are never lost because of a screenshot.
+
+A capture from the popup or the command is still refused during a session. The
+mode None and the edit capture screenshots do not change.
+
+Session smoke checklist:
+
+1. Mode Crop, one element inside the viewport: the output is the same as
+   before, and the page does not scroll.
+2. Mode Crop, one element taller than the viewport and one below the fold: each
+   screenshot shows the whole element.
+3. Mode Full on a long page: the screenshot shows the whole page with the
+   numbered badges at the right elements.
+4. Mode Full on a very long page: the agent output says "partial", and no
+   "Screenshot capture failed" line appears.
+5. After each submit the page is at its earlier scroll position, and the
+   Pi Annotate UI is gone as today.
+6. Prepare output (the Copy path) gives the same screenshots as Submit.
+
 ## Limits
 
 - Pages that load content only while they scroll can give a short image.

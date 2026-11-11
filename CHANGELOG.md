@@ -16,6 +16,7 @@ All notable changes to Pi Annotate.
 - **Multi-client native host** — Multiple Pi/MCP client processes can stay connected to the same browser profile, with request responses routed to their initiating client
 
 ### Changed
+- **Annotation screenshots cover the page** — Mode Full captures the entire page, and mode Crop crops a tall or off-screen element whole from a scrolled page capture; large images are re-encoded to fit, and the agent output names a partial or reduced screenshot
 - Native host instances publish isolated per-user socket/token metadata instead of competing for one global `/tmp/pi-annotate.sock`
 - Session replacement is scoped to the displaced request and no longer disconnects the entire client
 - Browser extension, native host, and MCP clients now share the same runtime-directory contract across sandbox namespaces, with `PI_ANNOTATE_REGISTRY_DIR` override support and legacy `/tmp` compatibility for older hosts

@@ -184,7 +184,7 @@ The call blocks until you submit or cancel in the browser (or the timeout fires)
 
 **Inline Note Cards** — Draggable floating cards with per-element comments, SVG connectors linking notes to elements, click-to-scroll, and per-element screenshot toggles.
 
-**Screenshots** — Individual crops per element (20px padding) or full-page mode with numbered badges drawn on the screenshot to identify elements. Toggle per element with the 📷 button.
+**Screenshots** — Individual crops per element (20px padding) or full-page mode with numbered badges drawn on the screenshot to identify elements. Toggle per element with the 📷 button. Crop keeps the one-picture path while each element is in view; an element that is taller than the viewport or below the fold is cropped whole from a scrolled page capture. Full always captures the entire page. A partial or reduced screenshot is named in the agent output. See `docs/capture.md`.
 
 **Edit Capture** — Toggle "Etch" in the toolbar to record DevTools edits. Change inline styles, modify CSS rules, add/remove classes, edit text — everything is tracked via MutationObserver. A pulsing red dot and badge counter show recording status. At submit, the extension takes before/after screenshots by briefly undoing visual changes, and produces structured property-level diffs the agent can map to source code. Works alongside element selection or standalone.
 
