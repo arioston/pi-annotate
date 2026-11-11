@@ -68,7 +68,7 @@
 
   function toBlob(canvas, type, quality) {
     return new Promise(function (resolve, reject) {
-      canvas.toBlob(function (blob) { blob ? resolve(blob) : reject(new Error("Could not encode the image")); }, type, quality);
+      canvas.toBlob(function (blob) { if (blob) resolve(blob); else reject(new Error("Could not encode the image")); }, type, quality);
     });
   }
 

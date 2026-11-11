@@ -42,7 +42,10 @@
   // A PDF text string: a literal with (, ), and \ escaped; UTF-16BE hex when
   // the text holds a character above 126.
   function textString(value) {
-    var s = String(value == null ? "" : value).replace(/[\u0000-\u001f\u007f]/g, " ");
+    var s = String(value == null ? "" : value).split("").map(function (c) {
+      var n = c.charCodeAt(0);
+      return n < 32 || n === 127 ? " " : c;
+    }).join("");
     if (/[^ -~]/.test(s)) {
       var hex = "FEFF";
       for (var i = 0; i < s.length; i++) hex += ("0000" + s.charCodeAt(i).toString(16).toUpperCase()).slice(-4);

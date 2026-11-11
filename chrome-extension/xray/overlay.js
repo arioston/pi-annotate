@@ -65,7 +65,7 @@
   function parseColor(str) {
     var m = /rgba?\(([^)]+)\)/.exec(str || "");
     if (!m) return null;
-    var p = m[1].split(/[ ,\/]+/).filter(Boolean).map(parseFloat);
+    var p = m[1].split(/[ ,/]+/).filter(Boolean).map(parseFloat);
     return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
   }
 
