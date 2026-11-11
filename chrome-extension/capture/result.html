@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pi Annotate capture</title>
+  <link rel="stylesheet" href="result.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="meta">
+      <h1>Full-page capture</h1>
+      <p class="source" id="source"></p>
+      <p class="facts" id="facts"></p>
+      <p class="notice" id="partial" hidden></p>
+    </div>
+    <div class="actions" id="actions" hidden>
+      <button type="button" id="dl-png">Download PNG</button>
+      <button type="button" id="dl-jpg">Download JPG</button>
+      <button type="button" id="copy">Copy</button>
+      <span class="pdf">
+        <label for="paper">PDF paper</label>
+        <select id="paper">
+          <option value="a4">A4</option>
+          <option value="letter">Letter</option>
+          <option value="one-page">One page</option>
+        </select>
+        <button type="button" id="dl-pdf">Download PDF</button>
+      </span>
+    </div>
+    <p class="status" id="status" role="status"></p>
+  </header>
+  <main id="images"></main>
+  <script src="../lib/capture-plan.js"></script>
+  <script src="../lib/pdf-writer.js"></script>
+  <script src="store.js"></script>
+  <script src="result.js"></script>
+</body>
+</html>
