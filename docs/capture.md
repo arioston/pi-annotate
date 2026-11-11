@@ -114,6 +114,8 @@ Session smoke checklist:
 - Pages that load content only while they scroll can give a short image.
 - Cross-origin iframes are captured as painted.
 - Restricted pages (`chrome://`, the Web Store) cannot be captured.
+- A session screenshot above 12 MB is reduced to JPEG and is not in the Copy
+  images. Submit keeps it.
 - Deferred: live links in the PDF, a text-aware page split, the frame around an
   inner scroller, horizontal scrolling, and a default key.
 
