@@ -979,7 +979,7 @@
     } else if (msg.type === "CAPTURE_PAGE_BEGIN") {
       // Full-page capture (plan 1169): the page module refuses during a session.
       if (!window.__piCapture) { sendResponse({ error: "Capture is not available on this page" }); return false; }
-      window.__piCapture.begin({ sessionActive: isActive }).then(sendResponse);
+      window.__piCapture.begin({ sessionActive: isActive, fromSession: !!msg.fromSession }).then(sendResponse);
       return true;
     } else if (msg.type === "CAPTURE_PAGE_STEP") {
       if (!window.__piCapture) { sendResponse({ error: "Capture is not available on this page" }); return false; }

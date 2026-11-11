@@ -465,6 +465,56 @@ const io = (router, { active = 1, during } = {}) => ({
   capture: async () => { if (during) during(router); return { dataUrl: "data:image/png;base64,ZZZZ" }; },
 });
 
+// A page capture runs several pictures under one guard (plan 1170).
+const pageIo = (router, { active = 1, steps = 3, during } = {}) => {
+  const calls = { capture: 0 };
+  return {
+    calls,
+    getActiveTabId: async () => active,
+    capture: async () => {
+      calls.capture += 1;
+      const tiles = [];
+      for (let i = 0; i < steps; i++) {
+        await Promise.resolve();
+        if (during) during(router, i);
+        tiles.push({ dataUrl: "data:image/png;base64,T" + i });
+      }
+      return { tiles };
+    },
+  };
+};
+
+test("page capture: a wrong generation is refused and nothing runs", async () => {
+  const { router } = harness();
+  startSession(router, 1, 5);
+  const stub = pageIo(router);
+  const out = await router.guardedCapture(content(1), 4, stub);
+  assert.equal(out.error, "The annotated page changed. Try again");
+  assert.equal(out.tiles, undefined);
+  assert.equal(stub.calls.capture, 0);
+});
+
+test("page capture: a tab that is not the active tab is refused and nothing runs", async () => {
+  const { router } = harness();
+  startSession(router, 1);
+  const stub = pageIo(router, { active: 2 });
+  const out = await router.guardedCapture(content(1), 1, stub);
+  assert.equal(out.error, "Activate the annotated tab, then try again");
+  assert.equal(stub.calls.capture, 0);
+});
+
+test("page capture: a tab change during the loop discards the tiles", async () => {
+  const { router } = harness();
+  startSession(router, 1);
+  const ok = await router.guardedCapture(content(1), 1, pageIo(router));
+  assert.equal(ok.tiles.length, 3);
+  const out = await router.guardedCapture(content(1), 1, pageIo(router, {
+    during: (r, i) => { if (i === 1) r.noteTabEvent({ kind: "activated", tabId: 2, windowId: 1 }); },
+  }));
+  assert.ok(out.error);
+  assert.equal(out.tiles, undefined);
+});
+
 test("capture: normal capture works", async () => {
   const { router } = harness();
   startSession(router, 1);

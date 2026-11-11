@@ -20,6 +20,12 @@
  *      inline value and priority.
  * It also adds two listeners (Escape, pagehide). -> removed.
  *
+ * ANNOTATION SESSION (plan 1170). A capture that the session itself asks for
+ * (begin with fromSession: true) is allowed during a session. A capture from
+ * the popup or the command is still refused. Nodes of Pi Annotate (id or class
+ * that starts with "pi-") are never chosen as the scroll target and never
+ * hidden, so the session UI keeps the state that the session gave it.
+ *
  * SCROLL TARGET. The document scroller when the document is taller than the
  * viewport. Otherwise the largest visible element that scrolls on the vertical
  * axis (for example a chat pane); its content is the output, without the frame
@@ -63,13 +69,17 @@
     return { left: left, top: top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
   }
 
+  function isPiNode(el) {
+    return !!el.closest('[id^="pi-"], [class^="pi-"], [class*=" pi-"]');
+  }
+
   function innerScroller() {
     var best = null;
     var bestArea = 0;
     var all = document.body ? document.body.querySelectorAll("*") : [];
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
-      if (el.scrollHeight <= el.clientHeight + 1 || el.clientHeight < 100) continue;
+      if (el.scrollHeight <= el.clientHeight + 1 || el.clientHeight < 100 || isPiNode(el)) continue;
       var oy = getComputedStyle(el).overflowY;
       if (oy !== "auto" && oy !== "scroll" && oy !== "overlay") continue;
       var r = clipToViewport(el.getBoundingClientRect());
@@ -107,7 +117,7 @@
     var all = document.querySelectorAll("*");
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
-      if (el.id === STYLE_ID) continue;
+      if (el.id === STYLE_ID || isPiNode(el)) continue;
       if (run.kind === "element" && run.target.el.contains(el)) continue;
       var pos = getComputedStyle(el).position;
       if (pos !== "fixed" && pos !== "sticky") continue;
@@ -136,12 +146,13 @@
   }
 
   /**
-   * begin({ sessionActive }) -> metrics, or { error }.
-   * Refuses while an annotation session is active (plan 1169, decision 3).
+   * begin({ sessionActive, fromSession }) -> metrics, or { error }.
+   * Refuses while an annotation session is active (plan 1169, decision 3),
+   * unless the session itself asked for the capture (plan 1170).
    */
   function begin(options) {
     var opts = options || {};
-    if (opts.sessionActive) return Promise.resolve({ error: "Close the annotation session before a full-page capture." });
+    if (opts.sessionActive && !opts.fromSession) return Promise.resolve({ error: "Close the annotation session before a full-page capture." });
     if (run) end();
     var target = findTarget();
     var styleEl = document.createElement("style");
@@ -193,5 +204,15 @@
     });
   }
 
-  root.__piCapture = { begin: begin, step: step, end: end };
+  /**
+   * describe() -> { kind, visible, scrollTop }: what begin() would choose,
+   * with no change to the page. The session reads it before the capture to
+   * turn element rectangles into content coordinates.
+   */
+  function describe() {
+    var target = findTarget();
+    return { kind: target.kind, visible: visibleRectOf(target), scrollTop: scrollTopOf(target) };
+  }
+
+  root.__piCapture = { begin: begin, step: step, end: end, describe: describe };
 })(globalThis);

@@ -781,6 +781,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === "CAPTURE_PAGE") {
+    // Page capture for the annotation session (plan 1170). The router checks the
+    // session generation and the tab for the whole multi-picture run; a tab change
+    // during the run discards the tiles. Nothing is stored and no tab opens.
+    if (!sender.tab?.windowId) {
+      sendResponse({ error: "No window ID" });
+      return true;
+    }
+    const tabId = sender.tab.id;
+    router.guardedCapture(sender, msg.generation, {
+      getActiveTabId: async (windowId) => {
+        const [tab] = await chrome.tabs.query({ active: true, windowId });
+        return tab?.id ?? null;
+      },
+      capture: async (windowId) => {
+        if (captureRun) return { error: "A capture is already running" };
+        captureRun = { tabId, aborted: false };
+        try {
+          return await captureTiles(tabId, windowId, { fromSession: true, shouldStop: () => captureRun.aborted });
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : String(err) };
+        } finally {
+          captureRun = null;
+        }
+      },
+    }).then(sendResponse, (err) => {
+      sendResponse({ error: err instanceof Error ? err.message : String(err) });
+    });
+    return true;
+  }
+
   if (["ANNOTATIONS_COMPLETE", "CANCEL"].includes(msg.type)) {
     if (requestId) requestTabs.delete(requestId);
     if (msg.type === "ANNOTATIONS_COMPLETE" && requestId && msg.result) {
