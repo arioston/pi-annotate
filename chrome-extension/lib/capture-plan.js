@@ -146,7 +146,57 @@
     });
   }
 
+  // ── session helpers (plan 1170) ──────────────────────────────────────
+
+  var SCREENSHOT_PADDING = 20; // CSS px around a cropped element
+  var REDUCE_LIMIT = 12 * 1024 * 1024; // below the host limit of 15 MB, on purpose
+  var SCALE_STEP = 0.75;
+
+  /**
+   * True when one rectangle is not fully inside the viewport. The viewport is
+   * { width, height, scrollX, scrollY }; the rectangles are in page CSS px
+   * ({ left, top, width, height }). A list with no rectangle gives false.
+   */
+  function needsPageCapture(view, rects) {
+    var x0 = view.scrollX || 0;
+    var y0 = view.scrollY || 0;
+    return rects.some(function (r) {
+      return r.left < x0 || r.top < y0 ||
+        r.left + r.width > x0 + view.width || r.top + r.height > y0 + view.height;
+    });
+  }
+
+  /**
+   * The crop rectangle in image px for an element rectangle in page CSS px.
+   * Adds the padding, scales by the device pixel ratio, and clamps to the
+   * image. Returns null when nothing is left.
+   */
+  function cropRect(rect, padding, dpr, image) {
+    var x0 = Math.max(0, Math.round((rect.left - padding) * dpr));
+    var y0 = Math.max(0, Math.round((rect.top - padding) * dpr));
+    var x1 = Math.min(image.width, Math.round((rect.left + rect.width + padding) * dpr));
+    var y1 = Math.min(image.height, Math.round((rect.top + rect.height + padding) * dpr));
+    if (x1 <= x0 || y1 <= y0) return null;
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  /**
+   * The next action for an image that is `bytes` big. `format` is the format
+   * it has now ("png" or "jpeg"). A PNG above the limit is encoded again as
+   * JPEG; a JPEG above the limit is scaled down by steps of 0.75.
+   */
+  function reducePlan(bytes, limit, format) {
+    if (bytes <= (limit || REDUCE_LIMIT)) return { action: "keep" };
+    if (format === "png") return { action: "jpeg" };
+    return { action: "scale", factor: SCALE_STEP };
+  }
+
   root.PiCapturePlan = {
+    SCREENSHOT_PADDING: SCREENSHOT_PADDING,
+    REDUCE_LIMIT: REDUCE_LIMIT,
+    needsPageCapture: needsPageCapture,
+    cropRect: cropRect,
+    reducePlan: reducePlan,
     MAX_TILES: MAX_TILES,
     MAX_HEIGHT: MAX_HEIGHT,
     CANVAS_LIMIT: CANVAS_LIMIT,
