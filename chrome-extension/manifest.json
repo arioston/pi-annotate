@@ -42,6 +42,7 @@
         "xray/measure.js",
         "xray/overlay.js",
         "xray/controller.js",
+        "lib/capture-plan.js",
         "capture/page.js",
         "content.js"
       ],

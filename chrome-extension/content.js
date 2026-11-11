@@ -143,6 +143,16 @@
     return sent.ok ? sent.value : null;
   }
 
+  // Ask the background for a page capture: several pictures joined later in
+  // this script (plan 1170). Same guard and same strict rule as captureScreenshot.
+  async function requestPageCapture() {
+    const sent = await PiSafeRuntime.sendMessageSafe({ type: "CAPTURE_PAGE", generation: sessionGeneration });
+    if (!sent.ok) throw new Error("The extension is not available. Reload the page and try again.");
+    if (sent.value?.error) throw new Error(sent.value.error);
+    if (!sent.value?.tiles?.length) throw new Error("The page capture returned no picture");
+    return sent.value;
+  }
+
   // Check if element is part of pi-annotate UI (by id or class)
   function isPiElement(el) {
     if (!el) return false;
@@ -1295,7 +1305,7 @@
         <div class="pi-screenshot-toggle">
           <span class="pi-toggle-label">Screenshot</span>
           <button class="pi-ss-btn active" id="pi-ss-each" title="Crop screenshot to each element">Crop</button>
-          <button class="pi-ss-btn" id="pi-ss-full" title="Capture entire viewport">Full</button>
+          <button class="pi-ss-btn" id="pi-ss-full" title="Capture the entire page">Full</button>
           <button class="pi-ss-btn" id="pi-ss-none" title="No screenshots">None</button>
         </div>
         <div class="pi-spacer"></div>
@@ -3813,6 +3823,45 @@
     });
   }
   
+  // One numbered badge, centered at (centerX, centerY) in canvas px. Shared by
+  // the viewport form and the page form.
+  function drawBadge(ctx, canvas, dpr, number, centerX, centerY) {
+    // Badge styling (matches .pi-marker-badge)
+    const badgeSize = 28 * dpr;
+    const fontSize = 13 * dpr;
+    const bgColor = "#8abeb7";     // --pi-accent (teal)
+    const textColor = "#1d1f21";   // --pi-bg-body (dark)
+
+    // Clamp to keep badge fully visible within canvas
+    const badgeX = Math.max(badgeSize / 2, Math.min(centerX, canvas.width - badgeSize / 2));
+    const badgeY = Math.max(badgeSize / 2, Math.min(centerY, canvas.height - badgeSize / 2));
+
+    // Badge shadow (set before fill so it applies to the shape)
+    ctx.shadowColor = "rgba(0, 0, 0, 0.3)";
+    ctx.shadowBlur = 4 * dpr;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 2 * dpr;
+
+    // Badge background (circle)
+    ctx.beginPath();
+    ctx.arc(badgeX, badgeY, badgeSize / 2, 0, Math.PI * 2);
+    ctx.fillStyle = bgColor;
+    ctx.fill();
+
+    // Reset shadow for text
+    ctx.shadowColor = "transparent";
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+
+    // Badge number
+    ctx.fillStyle = textColor;
+    ctx.font = `bold ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(number), badgeX, badgeY);
+  }
+
   /**
    * Add numbered badges to a full-page screenshot for selected elements
    * @param {string} dataUrl - Base64 screenshot data URL
@@ -3837,12 +3886,6 @@
         // Draw the original screenshot
         ctx.drawImage(img, 0, 0);
         
-        // Badge styling (matches .pi-marker-badge)
-        const badgeSize = 28 * dpr;
-        const fontSize = 13 * dpr;
-        const bgColor = "#8abeb7";     // --pi-accent (teal)
-        const textColor = "#1d1f21";   // --pi-bg-body (dark)
-        
         elements.forEach((sel, i) => {
           const element = sel.element;
           if (!element || !document.contains(element)) return;
@@ -3852,37 +3895,7 @@
           // Badge center should be at element's top-right corner (matching DOM badge positioning)
           // DOM: badge.style.left = rect.right - 14, badge.style.top = rect.top - 14
           // This puts the 28px badge's CENTER at (rect.right, rect.top)
-          const centerX = rect.right * dpr;
-          const centerY = rect.top * dpr;
-          
-          // Clamp to keep badge fully visible within canvas
-          const badgeX = Math.max(badgeSize / 2, Math.min(centerX, canvas.width - badgeSize / 2));
-          const badgeY = Math.max(badgeSize / 2, Math.min(centerY, canvas.height - badgeSize / 2));
-          
-          // Badge shadow (set before fill so it applies to the shape)
-          ctx.shadowColor = "rgba(0, 0, 0, 0.3)";
-          ctx.shadowBlur = 4 * dpr;
-          ctx.shadowOffsetX = 0;
-          ctx.shadowOffsetY = 2 * dpr;
-          
-          // Badge background (circle)
-          ctx.beginPath();
-          ctx.arc(badgeX, badgeY, badgeSize / 2, 0, Math.PI * 2);
-          ctx.fillStyle = bgColor;
-          ctx.fill();
-          
-          // Reset shadow for text
-          ctx.shadowColor = "transparent";
-          ctx.shadowBlur = 0;
-          ctx.shadowOffsetX = 0;
-          ctx.shadowOffsetY = 0;
-          
-          // Badge number
-          ctx.fillStyle = textColor;
-          ctx.font = `bold ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          ctx.fillText(String(i + 1), badgeX, badgeY);
+          drawBadge(ctx, canvas, dpr, i + 1, rect.right * dpr, rect.top * dpr);
         });
         
         resolve(canvas.toDataURL("image/png"));
@@ -3892,6 +3905,200 @@
     });
   }
   
+  // ─────────────────────────────────────────────────────────────────────
+  // Page screenshots (plan 1170)
+  //
+  // The background scrolls the page and returns the pictures (tiles). This
+  // script joins them into one page image with PiCapturePlan.planJoin, then
+  // crops and badges with content coordinates.
+  // ─────────────────────────────────────────────────────────────────────
+
+  const REDUCE_JPEG_QUALITY = 0.85;
+  const REDUCE_MAX_STEPS = 12;
+
+  function loadImage(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Could not read a screenshot"));
+      img.src = dataUrl;
+    });
+  }
+
+  function dataUrlBytes(dataUrl) {
+    return Math.floor(((dataUrl.length - dataUrl.indexOf(",") - 1) * 3) / 4);
+  }
+
+  function jpegOf(canvas) {
+    const flat = document.createElement("canvas");
+    flat.width = canvas.width;
+    flat.height = canvas.height;
+    const ctx = flat.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, flat.width, flat.height);
+    ctx.drawImage(canvas, 0, 0);
+    return flat.toDataURL("image/jpeg", REDUCE_JPEG_QUALITY);
+  }
+
+  // Rule 4: an image above 12 MB as PNG is encoded again as JPEG; if it is
+  // still above 12 MB it is scaled down by steps of 0.75.
+  function fitCanvas(canvas) {
+    let dataUrl = canvas.toDataURL("image/png");
+    if (PiCapturePlan.reducePlan(dataUrlBytes(dataUrl), undefined, "png").action === "keep") {
+      return { dataUrl, reduced: false };
+    }
+    let current = canvas;
+    dataUrl = jpegOf(current);
+    for (let i = 0; i < REDUCE_MAX_STEPS; i++) {
+      const plan = PiCapturePlan.reducePlan(dataUrlBytes(dataUrl), undefined, "jpeg");
+      if (plan.action === "keep") break;
+      const smaller = document.createElement("canvas");
+      smaller.width = Math.max(1, Math.floor(current.width * plan.factor));
+      smaller.height = Math.max(1, Math.floor(current.height * plan.factor));
+      smaller.getContext("2d").drawImage(current, 0, 0, smaller.width, smaller.height);
+      current = smaller;
+      dataUrl = jpegOf(current);
+    }
+    return { dataUrl, reduced: true };
+  }
+
+  // The same rule for a data URL from the one-picture path.
+  async function fitDataUrl(dataUrl) {
+    if (PiCapturePlan.reducePlan(dataUrlBytes(dataUrl), undefined, "png").action === "keep") {
+      return { dataUrl, reduced: false };
+    }
+    const img = await loadImage(dataUrl);
+    const canvas = document.createElement("canvas");
+    canvas.width = img.width;
+    canvas.height = img.height;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+    return fitCanvas(canvas);
+  }
+
+  // Element rectangle (viewport px) to content coordinates of the capture
+  // target: the origin is the top-left of the visible rectangle at scroll 0.
+  function toContentRect(rect, desc) {
+    return {
+      left: rect.left - desc.visible.left,
+      top: rect.top - desc.visible.top + desc.scrollTop,
+      width: rect.width,
+      height: rect.height,
+    };
+  }
+
+  // Join the tiles into the first output image. A page above the canvas limit
+  // gives more than one image; the rest are not used (deferred in plan 1170).
+  async function joinPageImage(tiles) {
+    const planned = PiCapturePlan.planJoin(tiles.map((t) => ({ src: t.src, destY: t.destY })));
+    if (!planned.length) throw new Error("The page capture returned no picture");
+    const first = planned[0];
+    const canvas = document.createElement("canvas");
+    canvas.width = first.width;
+    canvas.height = first.height;
+    const ctx = canvas.getContext("2d");
+    const loaded = new Map();
+    for (const part of first.parts) {
+      if (!loaded.has(part.tile)) loaded.set(part.tile, await loadImage(tiles[part.tile].dataUrl));
+      ctx.drawImage(loaded.get(part.tile), part.srcX, part.srcY, part.w, part.h, 0, part.destY, part.w, part.h);
+    }
+    return { canvas, imageCount: planned.length };
+  }
+
+  // Screenshots from a page capture. Rectangles are read before the capture
+  // because the capture scrolls the page.
+  async function pageScreenshots(entries) {
+    const desc = window.__piCapture.describe();
+    const rects = entries.map((e) => toContentRect(e.element.getBoundingClientRect(), desc));
+    const resp = await requestPageCapture();
+    const { canvas, imageCount } = await joinPageImage(resp.tiles);
+    const dpr = resp.metrics?.dpr || window.devicePixelRatio || 1;
+    const out = { screenshot: null, screenshots: [], partial: resp.partial || (imageCount > 1 ? "canvas" : null), reduced: false };
+
+    if (screenshotMode === "full") {
+      const ctx = canvas.getContext("2d");
+      entries.forEach((e, k) => {
+        const r = rects[k];
+        drawBadge(ctx, canvas, dpr, e.index + 1, (r.left + r.width) * dpr, r.top * dpr);
+      });
+      const fit = await fitCanvas(canvas);
+      out.screenshot = fit.dataUrl;
+      out.reduced = fit.reduced;
+      return out;
+    }
+
+    for (let k = 0; k < entries.length; k++) {
+      if (!entries[k].wants) continue;
+      const crop = PiCapturePlan.cropRect(rects[k], SCREENSHOT_PADDING, dpr, canvas);
+      if (!crop) continue;
+      const piece = document.createElement("canvas");
+      piece.width = crop.w;
+      piece.height = crop.h;
+      piece.getContext("2d").drawImage(canvas, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
+      const fit = await fitCanvas(piece);
+      out.screenshots.push({ index: entries[k].index + 1, dataUrl: fit.dataUrl });
+      out.reduced = out.reduced || fit.reduced;
+    }
+    return out;
+  }
+
+  // The one-picture path, as before plan 1170.
+  async function viewportScreenshots() {
+    const out = { screenshot: null, screenshots: [], partial: null, reduced: false };
+    const resp = await captureScreenshot();
+    if (!resp?.dataUrl) return out;
+    const fullScreenshot = resp.dataUrl;
+    if (screenshotMode === "full") {
+      // Add numbered badges to the full screenshot so elements can be identified
+      const badged = await fitDataUrl(await addBadgesToScreenshot(fullScreenshot, selectedElements));
+      out.screenshot = badged.dataUrl;
+      out.reduced = badged.reduced;
+      return out;
+    }
+    for (let i = 0; i < selectedElements.length; i++) {
+      const hasScreenshot = elementScreenshots.get(i) !== false;
+      const element = selectedElements[i].element;
+      if (hasScreenshot && element && document.contains(element)) {
+        const cropped = await fitDataUrl(await cropToElement(fullScreenshot, element));
+        out.screenshots.push({ index: i + 1, dataUrl: cropped.dataUrl });
+        out.reduced = out.reduced || cropped.reduced;
+      }
+    }
+    return out;
+  }
+
+  // Rules 1, 2, and 5 of plan 1170. Crop mode keeps the one-picture path while
+  // each wanted element is fully in the viewport (the page does not scroll).
+  // Full mode always captures the page. A failed page capture in a final
+  // submit falls back to the viewport picture and says so.
+  async function buildScreenshots(final) {
+    const entries = [];
+    selectedElements.forEach((sel, i) => {
+      if (!sel.element || !document.contains(sel.element)) return;
+      entries.push({ index: i, element: sel.element, wants: screenshotMode === "full" || elementScreenshots.get(i) !== false });
+    });
+    let needsPage = screenshotMode === "full";
+    if (!needsPage) {
+      const view = { width: window.innerWidth, height: window.innerHeight, scrollX: window.scrollX, scrollY: window.scrollY };
+      const pageRects = entries.filter((e) => e.wants).map((e) => {
+        const r = e.element.getBoundingClientRect();
+        return { left: r.left + window.scrollX, top: r.top + window.scrollY, width: r.width, height: r.height };
+      });
+      needsPage = PiCapturePlan.needsPageCapture(view, pageRects);
+    }
+    if (needsPage && window.__piCapture) {
+      try {
+        return await pageScreenshots(entries);
+      } catch (err) {
+        if (!final) throw err;
+        console.error("[pi-annotate] Page capture failed, using the viewport picture:", err);
+        const fallback = await viewportScreenshots();
+        fallback.partial = "viewport";
+        return fallback;
+      }
+    }
+    return viewportScreenshots();
+  }
+
   // ─────────────────────────────────────────────────────────────────────
   // Submit / Cancel
   // ─────────────────────────────────────────────────────────────────────
@@ -3957,27 +4164,16 @@
       
       let screenshot = null;
       let screenshots = [];
+      let screenshotPartial = null;
+      let screenshotReduced = false;
       
       if (screenshotMode !== "none") {
         try {
-          const resp = await captureScreenshot();
-          if (resp?.dataUrl) {
-            const fullScreenshot = resp.dataUrl;
-            
-            if (screenshotMode === "full") {
-              // Add numbered badges to the full screenshot so elements can be identified
-              screenshot = await addBadgesToScreenshot(fullScreenshot, selectedElements);
-            } else {
-              for (let i = 0; i < selectedElements.length; i++) {
-                const hasScreenshot = elementScreenshots.get(i) !== false;
-                const element = selectedElements[i].element;
-                if (hasScreenshot && element && document.contains(element)) {
-                  const cropped = await cropToElement(fullScreenshot, element);
-                  screenshots.push({ index: i + 1, dataUrl: cropped });
-                }
-              }
-            }
-          }
+          const shots = await buildScreenshots(final);
+          screenshot = shots.screenshot;
+          screenshots = shots.screenshots;
+          screenshotPartial = shots.partial;
+          screenshotReduced = shots.reduced;
         } catch (err) {
           if (!final) throw err;
           console.error("[pi-annotate] Screenshot failed:", err);
@@ -4040,6 +4236,8 @@
           elements,
           screenshot,
           screenshots,
+          ...(screenshotPartial ? { screenshotPartial } : {}),
+          ...(screenshotReduced ? { screenshotReduced: true } : {}),
           prompt: context,
           url: window.location.href,
           viewport: { width: window.innerWidth, height: window.innerHeight },
