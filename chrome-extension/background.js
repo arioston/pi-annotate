@@ -7,6 +7,9 @@
 
 // Panel routing (plan 1055): the protocol and the pure routing logic.
 importScripts("lib/routing.js", "panel/protocol.js");
+// Full-page capture (plan 1169): the planners and the store. The PDF writer is
+// loaded by the result page only.
+importScripts("lib/capture-plan.js", "capture/store.js");
 
 let nativePort = null;
 let pendingPing = null;
@@ -372,6 +375,170 @@ async function toggleXray() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Full-page capture (plan 1169)
+//
+// One capture runs at a time. The service worker owns the run state in memory.
+// The page module (capture/page.js) is the only code that changes the page and
+// the only code that restores it.
+// ─────────────────────────────────────────────────────────────────────────
+
+const CAPTURE_INTERVAL_MS = 550; // Chrome allows 2 tab captures each second
+let captureRun = null; // { tabId, aborted }
+let lastCaptureAt = 0;
+
+// Like sendToContentScript, but returns the answer of the page. Injects on a miss.
+async function requestContentScript(tabId, msg) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, msg);
+  } catch (err) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: chrome.runtime.getManifest().content_scripts[0].js,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    return await chrome.tabs.sendMessage(tabId, msg);
+  }
+}
+
+function dataUrlToBlob(dataUrl) {
+  const comma = dataUrl.indexOf(",");
+  const mime = /^data:([^;,]+)/.exec(dataUrl)?.[1] || "image/png";
+  const binary = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+async function isActiveTabOf(tabId, windowId) {
+  const [tab] = await chrome.tabs.query({ active: true, windowId });
+  return tab?.id === tabId;
+}
+
+function takePicture(windowId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.captureVisibleTab(windowId, { format: "png" }, (dataUrl) => {
+      if (chrome.runtime.lastError || !dataUrl) reject(new Error(chrome.runtime.lastError?.message || "Capture failed"));
+      else resolve(dataUrl);
+    });
+  });
+}
+
+async function waitForCaptureSlot() {
+  const wait = lastCaptureAt + CAPTURE_INTERVAL_MS - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+
+// The one capture loop (plans 1169 and 1170). It scrolls the tab, takes a
+// picture of each step, and returns the tiles. It always asks the page to
+// restore (CAPTURE_PAGE_END) before it returns or throws.
+//   options.shouldStop()  true when the run must stop (abort flag, tab change)
+//   options.isAllowed()   async; true when the tab may be captured now
+//   options.onProgress(n) called after each picture
+//   options.fromSession   true for a capture that an annotation session asked for
+// Returns { metrics, tiles: [{ dataUrl, src, destY }], partial }.
+async function captureTiles(tabId, windowId, options) {
+  const opts = options || {};
+  const stopped = () => opts.shouldStop && opts.shouldStop();
+  const allowed = async () => (await isActiveTabOf(tabId, windowId)) && (!opts.isAllowed || (await opts.isAllowed()));
+  try {
+    const metrics = await requestContentScript(tabId, { type: "CAPTURE_PAGE_BEGIN", fromSession: !!opts.fromSession });
+    if (!metrics || metrics.error) throw new Error(metrics?.error || "The page did not answer");
+    const dpr = metrics.dpr || 1;
+    const tiles = [];
+    let covered = 0;
+    let contentHeight = metrics.contentHeight;
+    let visible = metrics.visible;
+    let partial = null;
+    for (;;) {
+      if (stopped()) throw new Error("Capture stopped");
+      partial = PiCapturePlan.stopReason(tiles.length, covered / dpr, contentHeight);
+      if (partial) break;
+      const position = PiCapturePlan.nextPosition(covered, visible.height, contentHeight, dpr);
+      if (position === null) break;
+      const moved = await requestContentScript(tabId, { type: "CAPTURE_PAGE_STEP", position, hideFloating: tiles.length > 0 });
+      if (!moved || moved.error) throw new Error(moved?.error || "The page did not answer");
+      contentHeight = moved.contentHeight;
+      visible = moved.visible || visible;
+      if (!(await allowed())) throw new Error("The tab changed during the capture");
+      await waitForCaptureSlot();
+      let dataUrl;
+      try {
+        dataUrl = await takePicture(windowId);
+      } finally {
+        lastCaptureAt = Date.now();
+      }
+      if (stopped() || !(await allowed())) throw new Error("The tab changed during the capture");
+      const tile = PiCapturePlan.recordTile({ reported: moved.scrollTop, visible, contentHeight, dpr, covered });
+      if (!tile) break;
+      tiles.push({ dataUrl, src: tile.src, destY: tile.destY });
+      covered = tile.covered;
+      if (opts.onProgress) opts.onProgress(tiles.length);
+    }
+    return { metrics, tiles, partial };
+  } finally {
+    try {
+      await requestContentScript(tabId, { type: "CAPTURE_PAGE_END" });
+    } catch (err) {
+      console.log("[pi-annotate] Capture restore failed:", err instanceof Error ? err.message : String(err));
+    }
+  }
+}
+
+function flashBadge(text, ms) {
+  chrome.action.setBadgeText({ text });
+  if (ms) setTimeout(() => chrome.action.setBadgeText({ text: "" }), ms);
+}
+
+// Capture the whole page of the active tab and open the result tab.
+async function captureFullPage() {
+  if (captureRun) {
+    console.log("[pi-annotate] A capture is already running");
+    return;
+  }
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id || isRestrictedUrl(tab.url)) {
+      console.log("[pi-annotate] Cannot capture: no valid tab");
+      flashBadge("!", 3000);
+      return;
+    }
+    captureRun = { tabId: tab.id, aborted: false };
+    await PiCaptureStore.cleanup().catch(() => {});
+    const result = await captureTiles(tab.id, tab.windowId, {
+      shouldStop: () => captureRun.aborted,
+      onProgress: (n) => flashBadge(String(n)),
+    });
+    const id = await PiCaptureStore.save({
+      url: result.metrics.url,
+      title: result.metrics.title,
+      dpr: result.metrics.dpr,
+      partial: result.partial,
+      tiles: result.tiles.map((t) => ({ blob: dataUrlToBlob(t.dataUrl), src: t.src, destY: t.destY })),
+    });
+    flashBadge("");
+    await chrome.tabs.create({
+      url: chrome.runtime.getURL("capture/result.html") + "?id=" + id,
+      index: tab.index + 1,
+      windowId: tab.windowId,
+    });
+  } catch (err) {
+    console.error("[pi-annotate] Full-page capture failed:", err instanceof Error ? err.message : String(err));
+    flashBadge("!", 3000);
+  } finally {
+    captureRun = null;
+    if (!(await chrome.action.getBadgeText({}).catch(() => "")).startsWith("!")) flashBadge("");
+  }
+}
+
+// A tab change, a navigation, or a close stops a running capture.
+function stopCaptureFor(tabId) {
+  if (captureRun && (tabId === undefined || captureRun.tabId === tabId)) captureRun.aborted = true;
+}
+
+// Delete captures older than 24 hours when the service worker starts.
+PiCaptureStore.cleanup().catch(() => {});
+
 function connectNative() {
   if (nativePort) return;
 
@@ -489,6 +656,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "TOGGLE_PICKER") {
     togglePicker();
+    return;
+  }
+
+  if (msg.type === "CAPTURE_FULL_PAGE") {
+    captureFullPage();
+    return;
+  }
+
+  if (msg.type === "CAPTURE_PAGE_ABORT") {
+    // Only the content script of the captured tab can abort.
+    if (sender.tab?.id !== undefined) stopCaptureFor(sender.tab.id);
     return;
   }
 
@@ -616,6 +794,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+  stopCaptureFor(tabId);
   for (const [requestId, session] of networkSessions) {
     if (session.tabId === tabId) networkSessions.delete(requestId);
   }
@@ -626,10 +805,12 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
 // Panel bindings end when the document changes.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   router.noteTabEvent({ kind: "updated", tabId, changeInfo });
+  if (changeInfo.status === "loading") stopCaptureFor(tabId);
   if (changeInfo.status === "loading") router.onTabLoading(tabId);
 });
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
+  if (captureRun && activeInfo.tabId !== captureRun.tabId) stopCaptureFor(captureRun.tabId);
   router.noteTabEvent({ kind: "activated", tabId: activeInfo.tabId, windowId: activeInfo.windowId });
 });
 
@@ -639,6 +820,8 @@ chrome.commands.onCommand.addListener((command) => {
     togglePicker();
   } else if (command === "toggle-xray") {
     toggleXray();
+  } else if (command === "capture-full-page") {
+    captureFullPage();
   }
 });
 
