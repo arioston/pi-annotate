@@ -104,10 +104,15 @@ test("STATE validation accepts a good snapshot and rejects bad ones", () => {
   assert.equal(P.validateState({ ...state, type: "ACTION" }).ok, false);
 });
 
-test("PREPARED validation allows only PNG image data", () => {
+test("PREPARED validation allows PNG and JPEG image data and refuses every other type", () => {
   const good = { type: "PREPARED", preparedId: "p", revision: 2, text: "x", images: [{ dataUrl: "data:image/png;base64,AAAA" }] };
   assert.equal(P.validatePrepared(good).ok, true);
-  assert.equal(P.validatePrepared({ ...good, images: [{ dataUrl: "data:image/webp;base64,AAAA" }] }).ok, false);
+  assert.equal(P.validatePrepared({ ...good, images: [{ dataUrl: "data:image/jpeg;base64,/9j/AAAA" }] }).ok, true);
+  assert.equal(P.validatePrepared({ ...good, images: [{ dataUrl: "data:image/png;base64,AAAA" }, { dataUrl: "data:image/jpeg;base64,AAAA" }] }).ok, true);
+  for (const bad of ["data:image/webp;base64,AAAA", "data:image/gif;base64,AAAA", "data:image/svg+xml;base64,AAAA", "data:image/jpg;base64,AAAA", "data:image/jpeg;charset=x;base64,AAAA", "data:text/html;base64,AAAA", "image/jpeg;base64,AAAA"]) {
+    assert.equal(P.validatePrepared({ ...good, images: [{ dataUrl: bad }] }).ok, false, bad);
+  }
+  assert.equal(P.validatePrepared({ ...good, images: [{ dataUrl: "data:image/png;base64,AAAA" }, { dataUrl: "data:image/webp;base64,AAAA" }] }).ok, false);
   assert.equal(P.validatePrepared({ ...good, images: [{ dataUrl: "javascript:alert(1)" }] }).ok, false);
   assert.equal(P.validatePrepared({ type: "PREPARED", preparedId: "p", revision: 2, error: "nope" }).ok, true);
   assert.equal(P.validatePrepared({ ...good, text: 3 }).ok, false);

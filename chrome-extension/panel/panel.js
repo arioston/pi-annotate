@@ -84,7 +84,7 @@
       var stale = isStale();
       ui.copyText.disabled = !prepared || stale;
       for (var i = 0; i < imageButtons.length; i++) {
-        imageButtons[i].button.disabled = stale || !imageButtons[i].item;
+        imageButtons[i].button.disabled = stale || !imageButtons[i].item || !imageButtons[i].ready;
       }
       if (stale) setStatus("The session changed. Prepare again.", "");
     }
@@ -221,15 +221,42 @@
       return new env.Blob([bytes], { type: "image/png" });
     }
 
+    // A JPEG (a reduced session screenshot, plan 1172) becomes a PNG Blob here,
+    // because Chrome writes only image/png to the clipboard.
+    function jpegToPngBlob(dataUrl) {
+      return env.loadImage(dataUrl).then(function (img) {
+        var canvas = env.createCanvas();
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        canvas.getContext("2d").drawImage(img, 0, 0);
+        return new Promise(function (resolve, reject) {
+          canvas.toBlob(function (blob) {
+            if (blob) resolve(blob);
+            else reject(new Error("The picture could not be encoded"));
+          }, "image/png");
+        });
+      });
+    }
+
     function buildImageButtons(images) {
       imageButtons = [];
       ui.copyImages.textContent = "";
       images.forEach(function (img, i) {
         // Build the ClipboardItem before the button is enabled, so the click
-        // handler can call clipboard.write at once.
+        // handler can call clipboard.write at once. A JPEG gives an item whose
+        // image/png value is a Promise<Blob>; its button stays disabled until
+        // the conversion ends, and stays disabled if the conversion fails.
         var item = null;
+        var ready = false;
+        var conversion = null;
         try {
-          item = new env.ClipboardItem({ "image/png": dataUrlToBlob(img.dataUrl) });
+          if (img.dataUrl.indexOf("data:image/jpeg;base64,") === 0) {
+            conversion = jpegToPngBlob(img.dataUrl);
+            item = new env.ClipboardItem({ "image/png": conversion });
+          } else {
+            item = new env.ClipboardItem({ "image/png": dataUrlToBlob(img.dataUrl) });
+            ready = true;
+          }
         } catch (err) {
           item = null;
         }
@@ -238,7 +265,7 @@
         button.textContent = "Copy image " + (i + 1);
         button.disabled = true;
         button.addEventListener("click", function () {
-          if (!item) return;
+          if (!item || !entry.ready) return;
           var p;
           try { p = env.clipboard.write([item]); } catch (err) { p = Promise.reject(err); }
           Promise.resolve(p).then(
@@ -247,7 +274,21 @@
           );
         });
         ui.copyImages.appendChild(button);
-        imageButtons.push({ button: button, item: item });
+        var entry = { button: button, item: item, ready: ready };
+        imageButtons.push(entry);
+        if (conversion) {
+          // A newer PREPARED replaces imageButtons; an old conversion then does nothing.
+          conversion.then(function () {
+            if (imageButtons.indexOf(entry) === -1) return;
+            entry.ready = true;
+            render();
+          }, function (err) {
+            if (imageButtons.indexOf(entry) === -1) return;
+            entry.item = null;
+            setStatus("Could not convert image " + (i + 1) + " for the clipboard. " + describeError(err), "error");
+            render();
+          });
+        }
       });
     }
 
@@ -382,6 +423,15 @@
       ClipboardItem: root.ClipboardItem,
       Blob: root.Blob,
       atob: root.atob.bind(root),
+      loadImage: function (dataUrl) {
+        return new Promise(function (resolve, reject) {
+          var image = new root.Image();
+          image.onload = function () { resolve(image); };
+          image.onerror = function () { reject(new Error("The picture could not be decoded")); };
+          image.src = dataUrl;
+        });
+      },
+      createCanvas: function () { return root.document.createElement("canvas"); },
       useSelected: mode === "devtools" ? function (report) {
         root.chrome.devtools.inspectedWindow.eval(
           "window.__piAnnotateSelect && window.__piAnnotateSelect($0)",

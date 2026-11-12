@@ -30,12 +30,17 @@
       && typeof sender.url === "string" && !EXTENSION_URL.test(sender.url));
   }
 
-  // Pick the PNG data URLs of a result. WebP reference attachments are left out.
-  function collectPngImages(result) {
+  // Pick the PNG and JPEG data URLs of a result (plan 1172: a session screenshot
+  // above 12 MB is a JPEG). The panel converts a JPEG to PNG for the clipboard.
+  // WebP reference attachments are left out.
+  var COPY_IMAGE_PREFIXES = ["data:image/png;base64,", "data:image/jpeg;base64,"];
+  function collectCopyImages(result) {
     var images = [];
-    var PNG = "data:image/png;base64,";
     function add(label, dataUrl) {
-      if (typeof dataUrl === "string" && dataUrl.indexOf(PNG) === 0) images.push({ label: label, dataUrl: dataUrl });
+      if (typeof dataUrl !== "string") return;
+      for (var i = 0; i < COPY_IMAGE_PREFIXES.length; i++) {
+        if (dataUrl.indexOf(COPY_IMAGE_PREFIXES[i]) === 0) { images.push({ label: label, dataUrl: dataUrl }); return; }
+      }
     }
     if (!result || typeof result !== "object") return images;
     add("Full screenshot", result.screenshot);
@@ -351,7 +356,7 @@
         port: view.port,
         documentId: record.documentId,
         revision: revision,
-        images: collectPngImages(msg.result),
+        images: collectCopyImages(msg.result),
       };
       deps.sendToNative({ type: "FORMAT_RESULT", copyId: copyId, result: msg.result });
       return { ok: true, copyId: copyId };
@@ -531,7 +536,7 @@
     createRouter: createRouter,
     selectTargetTab: selectTargetTab,
     toNativeCompletion: toNativeCompletion,
-    collectPngImages: collectPngImages,
+    collectCopyImages: collectCopyImages,
     isPageTopFrame: isPageTopFrame,
     startsWithUrl: startsWithUrl,
     ACTIVATE_MESSAGE: ACTIVATE_MESSAGE,

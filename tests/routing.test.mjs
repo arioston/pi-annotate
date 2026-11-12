@@ -368,7 +368,7 @@ test("a host without the capability never gets FORMAT_RESULT", () => {
   assert.equal(last.revision, 4);
 });
 
-test("format flow: capability, FORMAT_RESULT, FORMATTED_RESULT, PNG images only, current view only", () => {
+test("format flow: capability, FORMAT_RESULT, FORMATTED_RESULT, PNG and JPEG images only, current view only", () => {
   const { router, log } = harness();
   startSession(router, 1);
   router.onPortMessage(pane("p1"), hello(1));
@@ -377,7 +377,7 @@ test("format flow: capability, FORMAT_RESULT, FORMATTED_RESULT, PNG images only,
   const result = {
     success: true,
     screenshot: "data:image/png;base64,AAAA",
-    screenshots: [{ index: 2, dataUrl: "data:image/png;base64,BBBB" }, { index: 3, dataUrl: "data:image/webp;base64,CCCC" }],
+    screenshots: [{ index: 2, dataUrl: "data:image/png;base64,BBBB" }, { index: 3, dataUrl: "data:image/webp;base64,CCCC" }, { index: 4, dataUrl: "data:image/jpeg;base64,FFFF" }],
     elements: [{ attachments: [{ dataUrl: "data:image/webp;base64,DDDD" }] }],
     editCapture: { beforeScreenshot: "data:image/png;base64,EEEE", afterScreenshot: null },
   };
@@ -396,11 +396,16 @@ test("format flow: capability, FORMAT_RESULT, FORMATTED_RESULT, PNG images only,
   assert.equal(prepared.msg.revision, 7);
   assert.equal(prepared.msg.text, "## text");
   assert.deepEqual(prepared.msg.images.map((i) => i.dataUrl), [
-    "data:image/png;base64,AAAA", "data:image/png;base64,BBBB", "data:image/png;base64,EEEE",
+    "data:image/png;base64,AAAA", "data:image/png;base64,BBBB", "data:image/jpeg;base64,FFFF", "data:image/png;base64,EEEE",
   ]);
   assert.equal(PiPanelProtocol.validatePrepared(prepared.msg).ok, true);
   // an answer is delivered once
   assert.equal(router.onFormattedResult({ type: "FORMATTED_RESULT", copyId: out.copyId, text: "again" }).ok, false);
+});
+
+test("a reduced JPEG screenshot is one Copy image", () => {
+  const images = PiRouting.collectCopyImages({ screenshot: "data:image/jpeg;base64,/9j/AAAA" });
+  assert.deepEqual(plain(images), [{ label: "Full screenshot", dataUrl: "data:image/jpeg;base64,/9j/AAAA" }]);
 });
 
 test("a host error reaches the view as a message, and an unknown copyId is dropped", () => {

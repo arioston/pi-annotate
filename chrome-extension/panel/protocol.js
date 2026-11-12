@@ -146,6 +146,13 @@
     return { ok: true, state: { generation: raw.generation, revision: raw.revision, session: raw.session } };
   }
 
+  // PNG or JPEG only (plan 1172). The panel converts a JPEG to PNG for the
+  // clipboard. WebP and every other type are refused.
+  function isCopyImageUrl(value) {
+    return typeof value === "string"
+      && (value.indexOf("data:image/png;base64,") === 0 || value.indexOf("data:image/jpeg;base64,") === 0);
+  }
+
   /** Validate a background -> view PREPARED message. */
   function validatePrepared(raw) {
     if (!isPlainObject(raw) || raw.type !== TYPES.PREPARED) return { ok: false, reason: "not-prepared" };
@@ -157,7 +164,7 @@
     if (typeof raw.text !== "string" || !Array.isArray(raw.images)) return { ok: false, reason: "bad-prepared" };
     for (var i = 0; i < raw.images.length; i++) {
       var img = raw.images[i];
-      if (!isPlainObject(img) || typeof img.dataUrl !== "string" || img.dataUrl.indexOf("data:image/png;base64,") !== 0) {
+      if (!isPlainObject(img) || !isCopyImageUrl(img.dataUrl)) {
         return { ok: false, reason: "bad-prepared" };
       }
     }

@@ -105,7 +105,12 @@ Rules:
    JPEG (quality 0.85). If it is still above 12 MB, it is scaled down by steps
    of 0.75. The result has `screenshotReduced`, and the agent output says so.
    The 12 MB rule is below the host limit of 15 MB on purpose. Change both
-   together.
+   together. A reduced image is also in the Copy images (plan 1172): the
+   PREPARED message accepts PNG or JPEG data URLs (and refuses WebP and every
+   other type), and the panel page converts a JPEG to PNG with a canvas,
+   because the clipboard takes only `image/png`. The Copy button is disabled
+   until the conversion ends. If the conversion fails, the button stays
+   disabled and the status shows an error.
 5. **Fallback.** A failed page capture in a final submit falls back to the
    viewport picture. The result has `screenshotPartial: "viewport"`. Text and
    selections are never lost because of a screenshot.
@@ -132,8 +137,6 @@ Session smoke checklist:
 - Pages that load content only while they scroll can give a short image.
 - Cross-origin iframes are captured as painted.
 - Restricted pages (`chrome://`, the Web Store) cannot be captured.
-- A session screenshot above 12 MB is reduced to JPEG and is not in the Copy
-  images. Submit keeps it.
 - Deferred: live links in the PDF, a text-aware page split, the frame around an
   inner scroller, horizontal scrolling, and a default key.
 

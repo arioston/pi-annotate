@@ -71,7 +71,7 @@ const session = (over = {}) => ({
 });
 const stateMsg = (revision = 1, over = {}, generation = 1) => ({ type: "STATE", generation, revision, session: session(over) });
 
-function setup({ writeText, write, order = [], cleanupPage = null } = {}) {
+function setup({ writeText, write, order = [], cleanupPage = null, loadImage, createCanvas } = {}) {
   const doc = makeDoc();
   const sent = [];
   const clip = {
@@ -88,6 +88,8 @@ function setup({ writeText, write, order = [], cleanupPage = null } = {}) {
     atob: (s) => Buffer.from(s, "base64").toString("binary"),
     useSelected: null,
     cleanupPage,
+    loadImage,
+    createCanvas,
   });
   return { doc, sent, view, order };
 }
@@ -378,4 +380,87 @@ test("frame: a token message that does not come from window.parent is ignored", 
   const t = frameBoot();
   t.token("x", { not: "parent" });
   assert.equal(t.ports.length, 0);
+});
+
+// ── JPEG images are converted to PNG in the panel (plan 1172) ─────────────
+function fakeCanvasEnv({ failDecode = false, failEncode = false } = {}) {
+  const seen = { drawn: [], types: [] };
+  return {
+    seen,
+    loadImage: async (dataUrl) => {
+      if (failDecode) throw new Error("decode failed");
+      return { naturalWidth: 40, naturalHeight: 30, dataUrl };
+    },
+    createCanvas: () => ({
+      width: 0, height: 0,
+      getContext: () => ({ drawImage: (img) => seen.drawn.push(img) }),
+      toBlob(cb, type) {
+        seen.types.push(type);
+        cb(failEncode ? null : { type, size: this.width * this.height });
+      },
+    }),
+  };
+}
+const jpegMsg = () => preparedMsg({ images: [{ dataUrl: "data:image/jpeg;base64,/9j/AAAA" }] });
+
+test("a JPEG image gets a ClipboardItem with an image/png Blob promise, and the button enables after the conversion", async () => {
+  const canvas = fakeCanvasEnv();
+  const seen = [];
+  const { doc, view } = setup({ ...canvas, write: async (items) => { seen.push(items); } });
+  view.handleMessage(stateMsg());
+  view.handleMessage(jpegMsg());
+  const button = doc.byId["pi-copy-images"].children[0];
+  assert.equal(button.disabled, true, "disabled until the conversion ends");
+  await tick();
+  await tick();
+  assert.equal(button.disabled, false);
+  button.fire("click");
+  await tick();
+  assert.equal(seen[0].length, 1);
+  const blob = await seen[0][0].map["image/png"];
+  assert.equal(blob.type, "image/png");
+  assert.deepEqual(canvas.seen.types, ["image/png"]);
+  assert.equal(canvas.seen.drawn[0].dataUrl, "data:image/jpeg;base64,/9j/AAAA");
+  assert.match(doc.byId["pi-status"].textContent, /Copied image 1/);
+});
+
+test("a PNG image is not decoded and its button is enabled at once", () => {
+  const canvas = fakeCanvasEnv();
+  const { doc, view } = setup(canvas);
+  view.handleMessage(stateMsg());
+  view.handleMessage(preparedMsg());
+  assert.equal(doc.byId["pi-copy-images"].children[0].disabled, false);
+  assert.deepEqual(canvas.seen.types, []);
+});
+
+test("a failed JPEG decode keeps the button disabled and shows an error", async () => {
+  const { doc, view } = setup(fakeCanvasEnv({ failDecode: true }));
+  view.handleMessage(stateMsg());
+  view.handleMessage(jpegMsg());
+  await tick();
+  await tick();
+  assert.equal(doc.byId["pi-copy-images"].children[0].disabled, true);
+  assert.equal(doc.byId["pi-status"].className, "pi-status error");
+  assert.match(doc.byId["pi-status"].textContent, /Could not convert image 1/);
+});
+
+test("a failed PNG encode keeps the button disabled and shows an error", async () => {
+  const { doc, view } = setup(fakeCanvasEnv({ failEncode: true }));
+  view.handleMessage(stateMsg());
+  view.handleMessage(jpegMsg());
+  await tick();
+  await tick();
+  assert.equal(doc.byId["pi-copy-images"].children[0].disabled, true);
+  assert.match(doc.byId["pi-status"].textContent, /Could not convert image 1/);
+});
+
+test("a conversion that ends after a new Prepare does not touch the new buttons", async () => {
+  const { doc, view } = setup(fakeCanvasEnv({ failDecode: true }));
+  view.handleMessage(stateMsg());
+  view.handleMessage(jpegMsg());
+  view.handleMessage(preparedMsg()); // a newer PREPARED replaces the buttons
+  await tick();
+  await tick();
+  assert.equal(doc.byId["pi-copy-images"].children[0].disabled, false);
+  assert.doesNotMatch(doc.byId["pi-status"].textContent, /Could not convert/);
 });
