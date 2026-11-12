@@ -146,11 +146,7 @@
   // Ask the background for a page capture: several pictures joined later in
   // this script (plan 1170). Same guard and same strict rule as captureScreenshot.
   async function requestPageCapture() {
-    const sent = await PiSafeRuntime.sendMessageSafe({ type: "CAPTURE_PAGE", generation: sessionGeneration });
-    if (!sent.ok) throw new Error("The extension is not available. Reload the page and try again.");
-    if (sent.value?.error) throw new Error(sent.value.error);
-    if (!sent.value?.tiles?.length) throw new Error("The page capture returned no picture");
-    return sent.value;
+    return PiPageCaptureClient.request(PiSafeRuntime.sendMessageSafe, sessionGeneration);
   }
 
   // Check if element is part of pi-annotate UI (by id or class)

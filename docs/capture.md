@@ -68,9 +68,27 @@ Press Escape during a capture to stop it. Nothing is stored in that case.
 The annotation session uses the same engine, through the message
 `CAPTURE_PAGE`. The background runs the capture loop under the router guard
 (the session generation, and the active tab before and after each picture). It
-stores nothing and opens no tab. It returns the pictures, and the content
-script joins them with the join planner, then crops and badges with content
-coordinates.
+opens no tab and writes nothing to disk. The content script joins the pictures
+with the join planner, then crops and badges with content coordinates.
+
+One runtime message must stay below 64 MiB, and 60 tiles can be about 120 MB
+(plan 1173). So `CAPTURE_PAGE` does not return the pictures. It returns the run
+id, the tile count, the metrics, and the tile records (`src`, `destY`). The
+background keeps the pictures in memory (`lib/tile-store.js`). The content
+script then reads them with `CAPTURE_PAGE_TILE` (run id and index), one picture
+for each message (`lib/page-capture-client.js`). The background refuses an
+unknown run id, a bad index, an old generation, and a request from another tab.
+It frees the pictures of a run:
+
+- after the last tile (index = count - 1) is read;
+- on a tab change: the tab is closed or navigates, or another tab becomes
+  active in its window;
+- at the end of the session (`PANEL_SESSION_END`, `CANCEL`,
+  `ANNOTATIONS_COMPLETE`);
+- after 120 seconds with no read.
+
+If the service worker restarts during a run, the memory is gone. The tile
+request fails, and rule 5 (fallback) applies. There is no disk storage.
 
 Rules:
 

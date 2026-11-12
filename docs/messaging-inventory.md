@@ -48,7 +48,8 @@ send is wrapped so a closed port or a missing document is ignored.
 | `CAPTURE_PAGE_STEP` | background to content | scroll to a position; the page answers with the reported scroll position |
 | `CAPTURE_PAGE_END` | background to content | restore the page; sent from a `finally` block |
 | `CAPTURE_PAGE_ABORT` | content to background | `PiSafeRuntime.sendMessageSafe`; guarded; sent on Escape |
-| `CAPTURE_PAGE` (plan 1170) | content to background | `PiSafeRuntime.sendMessageSafe` from `requestPageCapture()`; guarded. The background runs `router.guardedCapture` around the whole multi-picture loop and answers with the tiles as data URLs (nothing is stored) |
+| `CAPTURE_PAGE` (plan 1170) | content to background | `PiPageCaptureClient.request()` through `PiSafeRuntime.sendMessageSafe`; guarded. The background runs `router.guardedCapture` around the whole multi-picture loop and answers with the run id, the tile count, the metrics, and the tile records, not the pictures (plan 1173). The pictures stay in memory in `PiTileStore` |
+| `CAPTURE_PAGE_TILE` (plan 1173) | content to background | `PiSafeRuntime.sendMessageSafe`; guarded. Asks for one picture by run id and index; the answer holds one data URL. The background checks the sender, the generation, and that the run belongs to the sender tab. It frees the run after the last tile, on a tab change, at the end of the session, and after 120 s |
 
 ## panel/panel.js (new in plan 1055)
 

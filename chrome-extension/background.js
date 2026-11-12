@@ -9,7 +9,7 @@
 importScripts("lib/routing.js", "panel/protocol.js");
 // Full-page capture (plan 1169): the planners and the store. The PDF writer is
 // loaded by the result page only.
-importScripts("lib/capture-plan.js", "capture/store.js");
+importScripts("lib/capture-plan.js", "lib/tile-store.js", "capture/store.js");
 
 let nativePort = null;
 let pendingPing = null;
@@ -385,6 +385,13 @@ async function toggleXray() {
 
 const CAPTURE_INTERVAL_MS = 550; // Chrome allows 2 tab captures each second
 let captureRun = null; // { tabId, aborted }
+// The tiles of a session page capture wait here until the content script has
+// read them, one for each message (plan 1173).
+const tileStore = PiTileStore.create({
+  newId: () => randomHex(8),
+  setTimer: (fn, ms) => setTimeout(fn, ms),
+  clearTimer: (handle) => clearTimeout(handle),
+});
 let lastCaptureAt = 0;
 
 // Like sendToContentScript, but returns the answer of the page. Injects on a miss.
@@ -725,6 +732,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   const requestId = getRequestId(msg);
 
+  // The end of a session frees the tiles of its page capture (plan 1173).
+  if (["ANNOTATIONS_COMPLETE", "CANCEL", PiPanelProtocol.TYPES.PANEL_SESSION_END].includes(msg.type) && sender.tab?.id !== undefined) {
+    tileStore.dropTab(sender.tab.id);
+  }
+
   if (msg.type === PiPanelProtocol.TYPES.PANEL_SESSION) {
     router.registerSession(sender, msg.generation);
     return;
@@ -784,12 +796,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "CAPTURE_PAGE") {
     // Page capture for the annotation session (plan 1170). The router checks the
     // session generation and the tab for the whole multi-picture run; a tab change
-    // during the run discards the tiles. Nothing is stored and no tab opens.
+    // during the run discards the tiles. Nothing is stored on disk and no tab opens.
+    // The answer holds the run id and the tile records, not the pictures: the
+    // content script reads each picture with CAPTURE_PAGE_TILE (plan 1173).
     if (!sender.tab?.windowId) {
       sendResponse({ error: "No window ID" });
       return true;
     }
     const tabId = sender.tab.id;
+    const windowId = sender.tab.windowId;
+    let runId = null;
     router.guardedCapture(sender, msg.generation, {
       getActiveTabId: async (windowId) => {
         const [tab] = await chrome.tabs.query({ active: true, windowId });
@@ -799,17 +815,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (captureRun) return { error: "A capture is already running" };
         captureRun = { tabId, aborted: false };
         try {
-          return await captureTiles(tabId, windowId, { fromSession: true, shouldStop: () => captureRun.aborted });
+          const result = await captureTiles(tabId, windowId, { fromSession: true, shouldStop: () => captureRun.aborted });
+          runId = tileStore.put(tabId, windowId, result.tiles.map((t) => t.dataUrl));
+          return {
+            runId,
+            count: result.tiles.length,
+            metrics: result.metrics,
+            partial: result.partial,
+            tiles: result.tiles.map((t) => ({ src: t.src, destY: t.destY })),
+          };
         } catch (err) {
           return { error: err instanceof Error ? err.message : String(err) };
         } finally {
           captureRun = null;
         }
       },
-    }).then(sendResponse, (err) => {
+    }).then((resp) => {
+      // The guard discards a run when the tab changed; free its tiles too.
+      if (resp?.error && runId) tileStore.drop(runId);
+      sendResponse(resp);
+    }, (err) => {
+      if (runId) tileStore.drop(runId);
       sendResponse({ error: err instanceof Error ? err.message : String(err) });
     });
     return true;
+  }
+
+  if (msg.type === "CAPTURE_PAGE_TILE") {
+    // One picture of a run (plan 1173). Same sender and generation check as
+    // CAPTURE_PAGE; the run must belong to the tab of the sender.
+    const auth = router.authorizeCapture(sender, msg.generation);
+    if (!auth.ok) {
+      sendResponse({ error: auth.error });
+      return;
+    }
+    sendResponse(tileStore.take(msg.runId, auth.tabId, msg.index));
+    return;
   }
 
   if (["ANNOTATIONS_COMPLETE", "CANCEL"].includes(msg.type)) {
@@ -826,6 +867,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   stopCaptureFor(tabId);
+  tileStore.dropTab(tabId);
   for (const [requestId, session] of networkSessions) {
     if (session.tabId === tabId) networkSessions.delete(requestId);
   }
@@ -837,11 +879,13 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   router.noteTabEvent({ kind: "updated", tabId, changeInfo });
   if (changeInfo.status === "loading") stopCaptureFor(tabId);
+  if (changeInfo.status === "loading") tileStore.dropTab(tabId);
   if (changeInfo.status === "loading") router.onTabLoading(tabId);
 });
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
   if (captureRun && activeInfo.tabId !== captureRun.tabId) stopCaptureFor(captureRun.tabId);
+  tileStore.dropOtherTabs(activeInfo.windowId, activeInfo.tabId);
   router.noteTabEvent({ kind: "activated", tabId: activeInfo.tabId, windowId: activeInfo.windowId });
 });
 
